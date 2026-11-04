@@ -22,6 +22,17 @@ MCP_URL = "https://oddiwire.com/mcp"
 PROTOCOL_VERSION = "2025-06-18"
 
 
+class RateLimited(SourceError):
+    """Сервис просит подождать: retry_after — сколько секунд."""
+
+    def __init__(self, message: str, retry_after: float = 300.0):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+DEFAULT_DAILY_LIMIT = 100  # бесплатный ключ
+
+
 def _parse_body(resp: httpx.Response) -> dict:
     """Ответ MCP приходит либо JSON, либо потоком SSE (`data: {...}`)."""
     ctype = resp.headers.get("content-type", "")
@@ -82,7 +93,11 @@ class OddiWire:
         except httpx.HTTPError as exc:
             raise SourceError(f"OddiWire недоступен: {exc}") from exc
         if resp.status_code == 429:
-            raise SourceError("OddiWire: лимит запросов исчерпан (429), попробуйте позже")
+            try:
+                wait = float(resp.headers.get("Retry-After", 300))
+            except ValueError:
+                wait = 300.0
+            raise RateLimited(f"OddiWire: лимит запросов (429), ждём {wait:.0f} с", wait)
         if resp.status_code >= 400:
             raise SourceError(f"OddiWire HTTP {resp.status_code}: {resp.text[:300]}")
         sid = resp.headers.get("Mcp-Session-Id")
@@ -119,9 +134,25 @@ class OddiWire:
         if not self._ready:
             self.initialize()
         result = self._rpc("tools/call", {"name": name, "arguments": arguments or {}})
+        payload = tool_payload(result)
+        if isinstance(payload, dict) and payload.get("error") == "rate_limited":
+            wait = float(payload.get("retry_after_ms") or 300_000) / 1000
+            raise RateLimited(f"OddiWire {name}: лимит «{payload.get('limit')} за {payload.get('window')}», ждём {wait:.0f} с", wait)
         if result.get("isError"):
-            raise SourceError(f"OddiWire {name}: {tool_payload(result)}")
-        return tool_payload(result)
+            raise SourceError(f"OddiWire {name}: {payload}")
+        return payload
+
+    def budget(self) -> tuple[int, int]:
+        """(использовано сегодня, дневной лимит) по get_my_plan — этот вызов квоту не тратит."""
+        plan = self.call("get_my_plan")
+        if not isinstance(plan, dict):
+            return 0, DEFAULT_DAILY_LIMIT
+        used = int((plan.get("usage") or {}).get("today") or 0)
+        limit = (plan.get("limits") or {}).get("per_day")
+        if plan.get("plan") == "demo" or not limit:
+            # демо: 10 запросов за 5 минут на всех; дневного лимита нет, но и квоту делят все
+            return 0, 10 * 12 * 24 // 4
+        return used, int(limit)
 
 
 def find_dota_sport(sports) -> str | None:

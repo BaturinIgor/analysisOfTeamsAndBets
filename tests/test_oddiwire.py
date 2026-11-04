@@ -185,3 +185,45 @@ def test_migration_adds_columns(tmp_path):
     old.close()
     cols = {r[1] for r in db.connect(path).execute("PRAGMA table_info(odds_snapshots)")}
     assert {"phase", "fair_prob"} <= cols
+
+
+def test_rate_limited_payload():
+    err = {"error": "rate_limited", "window": "5 minutes", "limit": 10, "retry_after_ms": 136581}
+
+    def handler(request):
+        body = json.loads(request.content)
+        if "id" not in body:
+            return httpx.Response(202)
+        if body["method"] == "initialize":
+            result = {}
+        else:
+            result = {"isError": True, "content": [{"type": "text", "text": json.dumps(err)}]}
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+    ow = OddiWire(make_client("ua", transport=httpx.MockTransport(handler)))
+    with pytest.raises(owm.RateLimited) as exc:
+        ow.call("get_prematch_odds")
+    assert 136 < exc.value.retry_after < 137
+    ow429 = OddiWire(make_client("ua", transport=httpx.MockTransport(lambda r: httpx.Response(429, headers={"Retry-After": "42"}))))
+    with pytest.raises(owm.RateLimited) as exc:
+        ow429.tools()
+    assert exc.value.retry_after == 42
+
+
+def test_next_pause():
+    from datetime import datetime, timezone
+
+    from bkanalyzer.cli import next_pause
+
+    noon = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
+    # 12 часов до полуночи, осталось 48 запросов → 16 снимков по 3 → раз в 45 минут
+    assert next_pause(52, 100, noon) == 43200 / 16
+    assert next_pause(0, 100000, noon) == 600  # не чаще min_interval
+    assert next_pause(99, 100, noon) > 43200  # квота кончилась — ждём следующих суток
+
+
+def test_max_calls(tmp_path):
+    conn = db.connect(tmp_path / "bk.sqlite3")
+    ow = FakeOW([EVENT], fixture_markets=MAPS)
+    collect_oddiwire_once(conn, ow, log=lambda *_: None, max_calls=1)
+    assert [c[0] for c in ow.calls] == ["get_live_odds"]

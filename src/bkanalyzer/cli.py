@@ -89,15 +89,20 @@ def collect_odds_once(s: Settings, conn, client=None) -> int:
     return saved
 
 
-def collect_oddiwire_once(conn, ow: OddiWire, maps: bool = True, log=print) -> int:
-    """Один снимок линии Dota из OddiWire: до матча и в эфире.
+def collect_oddiwire_once(conn, ow: OddiWire, maps: bool = True, log=print, max_calls: int | None = None) -> int:
+    """Один снимок линии Dota из OddiWire: в эфире и до матча.
 
-    Список матчей берём на tier=1 (там победа в матче). Победа на картах лежит в tier=3,
-    поэтому по каждому матчу дозапрашиваем get_fixture (если maps=True).
+    Списки берём на tier=1 (там победа в матче). Победа на картах лежит в tier=3,
+    её дозапрашиваем get_fixture только по матчам в эфире — после драфта это важнее всего.
+    max_calls ограничивает число платных по квоте запросов в этом снимке.
     """
+    left = 10**9 if max_calls is None else max_calls
     events: dict[str, dict] = {}
-    for tool in ("get_prematch_odds", "get_live_odds"):
+    for tool in ("get_live_odds", "get_prematch_odds"):
+        if left <= 0:
+            break
         payload = ow.call(tool, {"sport": ow_mod.DOTA2, "tier": 1, "limit": 100})
+        left -= 1
         if isinstance(payload, dict) and payload.get("_note"):
             log(f"  {tool}: {payload['_note']}")
         for ev in ow_mod.board_events(payload):
@@ -105,13 +110,17 @@ def collect_oddiwire_once(conn, ow: OddiWire, maps: bool = True, log=print) -> i
                 events[str(ev["event_id"])] = ev
     rows: list[dict] = []
     for eid, ev in events.items():
-        if maps:
+        is_live = ev.get("event_type") == "live" or ev.get("status") == "LIVE"
+        if maps and is_live and left > 0:
             try:
                 full = ow.call("get_fixture", {"fixture_id": eid, "tier": 3})
+                left -= 1
                 if isinstance(full, dict):
                     full = full.get("event", full)
                     if isinstance(full, dict) and full.get("markets"):
                         ev = {**ev, "markets": full["markets"]}
+            except ow_mod.RateLimited:
+                raise
             except SourceError as exc:
                 log(f"  {ev.get('name', eid)}: карты не получены ({exc})")
         rows += ow_mod.event_rows(ev)
@@ -120,6 +129,18 @@ def collect_oddiwire_once(conn, ow: OddiWire, maps: bool = True, log=print) -> i
     log(f"  матчей: {len(events)}, коэффициентов в снимке: {len(rows)}, новых/изменившихся: {saved}")
     return saved
 
+
+def next_pause(used: int, limit: int, now_utc=None, min_interval: int = 600, per_snapshot: int = 3) -> float:
+    """Пауза до следующего снимка, чтобы остаток дневной квоты растянулся до полуночи UTC."""
+    from datetime import datetime, timezone
+
+    now_utc = now_utc or datetime.now(timezone.utc)
+    seconds_left = 86400 - (now_utc.hour * 3600 + now_utc.minute * 60 + now_utc.second)
+    remaining = limit - used
+    if remaining < per_snapshot:
+        return max(float(min_interval), seconds_left + 60.0)
+    snapshots = remaining // per_snapshot
+    return max(float(min_interval), seconds_left / snapshots)
 
 def oddspapi_sample(s: Settings, client=None) -> str:
     """Рынки и исходы одного ближайшего матча Dota в OddsPapi — по ним настраиваем ODDSPAPI_WINNER_MARKET."""
@@ -462,20 +483,37 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "collect-odds":
         conn = db.connect(Path(s.db_path))
+        if args.source == "oddspapi":
+            while True:
+                try:
+                    print(f"{time.strftime('%H:%M:%S')} сохранено {collect_odds_once(s, conn)} коэффициентов")
+                except SourceError as exc:
+                    print(f"{time.strftime('%H:%M:%S')} ошибка: {exc}", file=sys.stderr)
+                if args.once:
+                    return 0
+                time.sleep(args.interval)
+        from .sources.oddiwire import RateLimited
+
         ow = OddiWire(make_client(s.user_agent), s.oddiwire_api_key)
+        if not s.oddiwire_api_key:
+            print("ODDIWIRE_API_KEY не задан: работаем на общем демо-ключе (10 запросов за 5 минут на всех).")
         while True:
+            pause = float(args.interval)
             try:
-                if args.source == "oddiwire":
-                    n = collect_oddiwire_once(conn, ow, maps=not args.no_maps)
-                else:
-                    n = collect_odds_once(s, conn)
-                print(f"{time.strftime('%H:%M:%S')} сохранено {n} коэффициентов")
+                used, limit = ow.budget()
+                n = collect_oddiwire_once(conn, ow, maps=not args.no_maps, max_calls=max(0, limit - used))
+                used, limit = ow.budget()
+                pause = next_pause(used, limit, min_interval=args.interval)
+                print(f"{time.strftime('%H:%M:%S')} сохранено {n}; квота {used}/{limit}; следующий снимок через {pause / 60:.0f} мин")
+            except RateLimited as exc:
+                pause = exc.retry_after + 5
+                print(f"{time.strftime('%H:%M:%S')} {exc}", file=sys.stderr)
             except SourceError as exc:
                 print(f"{time.strftime('%H:%M:%S')} ошибка: {exc}", file=sys.stderr)
                 ow.reset()  # сессия MCP могла истечь — следующий снимок откроет новую
             if args.once:
                 return 0
-            time.sleep(args.interval)
+            time.sleep(pause)
     return 2
 
 
