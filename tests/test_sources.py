@@ -134,3 +134,11 @@ def test_load_settings_from_env_file(tmp_path, monkeypatch):
 def test_betboom_filter():
     assert looks_like_odds("https://x/api/events", "{}")
     assert not looks_like_odds("https://x/api/user/profile", json.dumps({"name": "x"}))
+
+
+def test_oddspapi_sample(client):
+    from bkanalyzer.cli import oddspapi_sample
+
+    out = oddspapi_sample(settings(), client)
+    assert "Матч f1: A — B" in out
+    assert "betboom" in out and "рынок 101" in out and "1=1.85" in out
