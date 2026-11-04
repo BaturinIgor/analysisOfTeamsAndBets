@@ -97,6 +97,10 @@ class OddiWire:
             raise SourceError(f"OddiWire {method}: {msg['error']}")
         return msg.get("result", {})
 
+    def reset(self) -> None:
+        self.session_id = None
+        self._ready = False
+
     def initialize(self) -> dict:
         info = self._rpc(
             "initialize",
@@ -150,3 +154,79 @@ def find_dota_sport(sports) -> str | None:
         if cand.upper() == "DOTA2":
             return cand
     return found[0] if found else None
+
+
+DOTA2 = "DOTA2"
+BOOKMAKER = "oddin"
+MATCH_WINNER = "match_winner"
+
+
+def market_key(market: dict) -> str | None:
+    """Ключ рынка в нашей базе: match_winner или map_N_winner; прочие рынки пропускаем."""
+    if market.get("canonical") == MATCH_WINNER:
+        return MATCH_WINNER
+    name = (market.get("market") or "").strip()
+    parts = name.split()
+    # "Map 1 Winner - Twoway"
+    if len(parts) >= 3 and parts[0].lower() == "map" and parts[1].isdigit() and parts[2].lower() == "winner":
+        return f"map_{parts[1]}_winner"
+    return None
+
+
+def feed_id(event: dict) -> str | None:
+    """od:match:<id> — тот же id, что у матча в линии BetBoom."""
+    for m in event.get("markets") or []:
+        for sel in m.get("selections") or []:
+            pid = sel.get("provider_id") or ""
+            if pid.startswith("od:match:"):
+                return pid.split("/", 1)[0]
+    return None
+
+
+def event_rows(event: dict) -> list[dict]:
+    """Коэффициенты на победу в матче и на картах из одного события OddiWire."""
+    phase = "live" if (event.get("event_type") == "live" or event.get("status") == "LIVE") else "prematch"
+    rows = []
+    for m in event.get("markets") or []:
+        key = market_key(m)
+        if key is None or m.get("status") != "OPEN":
+            continue
+        for sel in m.get("selections") or []:
+            price = sel.get("price")
+            if not isinstance(price, (int, float)) or sel.get("status") not in (None, "TRADING"):
+                continue
+            rows.append(
+                {
+                    "bookmaker": BOOKMAKER,
+                    "fixture_id": str(event.get("event_id")),
+                    "start_time": event.get("starts"),
+                    "participant1": event.get("home"),
+                    "participant2": event.get("away"),
+                    "market": key,
+                    "outcome": sel.get("name"),
+                    "price": float(price),
+                    "phase": phase,
+                    "fair_prob": sel.get("probability"),
+                }
+            )
+    return rows
+
+
+def event_match(event: dict) -> dict:
+    score = event.get("score") or {}
+    return {
+        "match_id": str(event.get("event_id")),
+        "feed_id": feed_id(event),
+        "tournament_id": event.get("league"),
+        "start_time": event.get("starts"),
+        "team1": event.get("home"),
+        "team2": event.get("away"),
+        "format": None,
+        "score": f"{score['home']}:{score['away']}" if score.get("home") is not None and score.get("away") is not None else None,
+    }
+
+
+def board_events(payload) -> list[dict]:
+    if isinstance(payload, dict):
+        return [e for e in payload.get("events") or [] if isinstance(e, dict)]
+    return []

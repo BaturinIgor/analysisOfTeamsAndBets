@@ -41,6 +41,11 @@ def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.executescript(SCHEMA)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(odds_snapshots)")}
+    for name, kind in (("phase", "TEXT"), ("fair_prob", "REAL")):  # prematch | live; вероятность БК без маржи
+        if name not in cols:
+            conn.execute(f"ALTER TABLE odds_snapshots ADD COLUMN {name} {kind}")
+    conn.commit()
     return conn
 
 
@@ -111,7 +116,33 @@ def save_price_changes(conn: sqlite3.Connection, rows: list[dict], *, source: st
     return len(new)
 
 
+def save_feed_rows(conn: sqlite3.Connection, rows: list[dict], *, source: str, taken_at: str | None = None) -> int:
+    """Сохраняет снимок ленты (OddiWire): только изменившиеся цены, со всеми полями матча."""
+    taken_at = taken_at or _now()
+    new = []
+    for r in rows:
+        last = conn.execute(
+            """SELECT price, phase FROM odds_snapshots WHERE source=? AND bookmaker=? AND fixture_id=? AND market=? AND outcome=?
+               ORDER BY id DESC LIMIT 1""",
+            (source, r["bookmaker"], r["fixture_id"], r["market"], r["outcome"]),
+        ).fetchone()
+        if last is None or last[0] != r["price"] or last[1] != r.get("phase"):
+            new.append(
+                (taken_at, source, r["bookmaker"], r["fixture_id"], r.get("start_time"), r.get("participant1"), r.get("participant2"),
+                 r["market"], r["outcome"], r["price"], r.get("phase"), r.get("fair_prob"))
+            )
+    conn.executemany(
+        """INSERT INTO odds_snapshots
+           (taken_at, source, bookmaker, fixture_id, start_time, participant1, participant2, market, outcome, price, phase, fair_prob)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        new,
+    )
+    conn.commit()
+    return len(new)
+
+
 WINNER_MARKET = "Исход матча | Матч"
+FEED_WINNER_MARKET = "match_winner"
 
 
 def add_manual_winner_odds(conn: sqlite3.Connection, bookmaker: str, team1: str, team2: str, p1: float, p2: float, taken_at: str | None = None) -> None:
@@ -127,7 +158,7 @@ def add_manual_winner_odds(conn: sqlite3.Connection, bookmaker: str, team1: str,
 
 
 def latest_winner_odds(conn: sqlite3.Connection, team1: str, team2: str, oddspapi_market: str = "") -> list[tuple[str, float | None, float | None]]:
-    """Последние коэффициенты на победу (bookmaker, за team1, за team2) из ручного ввода и OddsPapi.
+    """Последние коэффициенты на победу (bookmaker, за team1, за team2): ручной ввод, OddsPapi, OddiWire.
 
     В OddsPapi исход "1" — participant1, "2" — participant2; рынок задаётся ODDSPAPI_WINNER_MARKET.
     """
@@ -135,19 +166,25 @@ def latest_winner_odds(conn: sqlite3.Connection, team1: str, team2: str, oddspap
     rows = conn.execute(
         """SELECT source, bookmaker, fixture_id, participant1, market, outcome, price FROM odds_snapshots
            WHERE ((lower(participant1)=lower(?) AND lower(participant2)=lower(?)) OR (lower(participant1)=lower(?) AND lower(participant2)=lower(?)))
-             AND ((source='manual' AND market=?) OR (source='oddspapi' AND market=?))
+             AND ((source='manual' AND market=?) OR (source='oddspapi' AND market=?) OR (source='oddiwire' AND market=?))
            ORDER BY id""",
-        (team1, team2, team2, team1, WINNER_MARKET, oddspapi_market or "\x00"),
+        (team1, team2, team2, team1, WINNER_MARKET, oddspapi_market or "\x00", FEED_WINNER_MARKET),
     ).fetchall()
     latest: dict[tuple[str, str], dict] = {}
     for source, bookmaker, fixture, part1, market, outcome, price in rows:
-        side = {"П1": 1, "1": 1, "П2": 2, "2": 2}.get(outcome)
-        if side is None:
-            continue
-        swapped = part1.casefold() != team1.casefold()
-        team_side = (3 - side) if swapped else side
+        if source == "oddiwire":  # исход — название команды
+            name = (outcome or "").casefold()
+            team_side = 1 if name == team1.casefold() else 2 if name == team2.casefold() else None
+            if team_side is None:
+                continue
+        else:
+            side = {"П1": 1, "1": 1, "П2": 2, "2": 2}.get(outcome)
+            if side is None:
+                continue
+            swapped = part1.casefold() != team1.casefold()
+            team_side = (3 - side) if swapped else side
         latest.setdefault((source, bookmaker), {})[team_side] = price
     for (source, bookmaker), prices in latest.items():
-        label = f"{bookmaker} (вручную)" if source == "manual" else bookmaker
+        label = f"{bookmaker} (вручную)" if source == "manual" else "oddin (линия BetBoom)" if source == "oddiwire" else bookmaker
         out.append((label, prices.get(1), prices.get(2)))
     return out
