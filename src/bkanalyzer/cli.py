@@ -134,6 +134,88 @@ def parse_run(run_dir: Path, conn=None) -> str:
     return "\n".join(lines)
 
 
+def _fitted(conn, eval_days: int = 180):
+    from . import history, rating
+
+    history.ensure_schema(conn)
+    maps = history.tier_maps(conn)
+    since = (maps[-1]["start_time"] - eval_days * 86400) if maps else 0
+    return rating.fit(maps, eval_since=since), len(maps)
+
+
+def rating_report(conn, eval_days: int = 180, top: int = 20) -> str:
+    (model, ev), total = _fitted(conn, eval_days)
+    if not total:
+        return "В базе нет карт Tier 1–2. Сначала: bk sync-matches"
+    lines = [
+        f"Карт Tier 1–2 в базе: {total}, команд: {len(model.teams)}",
+        f"Проверка на последних {eval_days} днях: {ev.n} карт",
+        f"  точность {ev.accuracy:.1%}, Brier {ev.brier:.4f} (0.25 = монетка), log-loss {ev.log_loss:.4f} (0.693 = монетка)",
+        "  Калибровка (прогноз фаворита → как часто он реально выигрывал):",
+    ]
+    lines += [f"    {rng:>8}: карт {n:>5}, прогноз {p:.1%}, факт {y:.1%}" for rng, n, p, y in ev.buckets]
+    lines.append(f"Топ-{top} по рейтингу (не меньше 20 карт):")
+    ranked = sorted((st for st in model.teams.values() if st.games >= 20), key=lambda st: -st.rating)[:top]
+    lines += [f"  {i:>2}. {st.rating:7.1f}  {st.name} ({st.games} карт)" for i, st in enumerate(ranked, 1)]
+    return "\n".join(lines)
+
+
+def _latest_betboom_prices(conn, t1: str, t2: str) -> dict | None:
+    row = conn.execute(
+        """SELECT match_id, team1, team2 FROM bookmaker_matches
+           WHERE source='betboom' AND ((lower(team1)=lower(?) AND lower(team2)=lower(?)) OR (lower(team1)=lower(?) AND lower(team2)=lower(?)))
+           ORDER BY updated_at DESC LIMIT 1""",
+        (t1, t2, t2, t1),
+    ).fetchone()
+    if not row:
+        return None
+    prices = {}
+    for side in ("П1", "П2"):
+        r = conn.execute(
+            """SELECT price FROM odds_snapshots WHERE source='betboom' AND fixture_id=? AND market='Исход матча | Матч' AND outcome=?
+               ORDER BY id DESC LIMIT 1""",
+            (row[0], side),
+        ).fetchone()
+        prices[side] = r[0] if r else None
+    swapped = row[1].lower() != t1.lower()
+    return {"t1": prices["П2"] if swapped else prices["П1"], "t2": prices["П1"] if swapped else prices["П2"]}
+
+
+def predict_report(conn, team1: str, team2: str, best_of: int = 3) -> str:
+    from . import rating
+
+    (model, _), total = _fitted(conn)
+    if not total:
+        return "В базе нет карт Tier 1–2. Сначала: bk sync-matches"
+    picked = []
+    for q in (team1, team2):
+        found = rating.find_team(model, q)
+        if not found:
+            return f"Команда «{q}» не найдена в истории Tier 1–2"
+        picked.append(found[0])
+    (a, sa), (b, sb) = picked
+    import time as _t
+
+    now = int(_t.time())
+    p = model.predict(a, b, now)
+    probs = rating.series_probabilities(p, best_of)
+    lines = [
+        f"{sa.name} ({sa.rating:.0f}, {sa.games} карт) — {sb.name} ({sb.rating:.0f}, {sb.games} карт), Bo{best_of}",
+        f"  карта: {p:.1%} / {1 - p:.1%}",
+    ]
+    names = {"win": sa.name, "lose": sb.name, "draw": "ничья"}
+    for k, v in probs.items():
+        lines.append(f"  {names[k]}: {v:.1%} (честный коэффициент {1 / v:.2f})" if v > 0 else f"  {names[k]}: 0%")
+    bb = _latest_betboom_prices(conn, sa.name, sb.name)
+    if bb and (bb["t1"] or bb["t2"]):
+        lines.append("  BetBoom, последний коэффициент на матч:")
+        for name, price, prob in ((sa.name, bb["t1"], probs["win"]), (sb.name, bb["t2"], probs["lose"])):
+            if price:
+                lines.append(f"    {name}: {price:.2f}, перевес (EV) {prob * price - 1:+.1%}")
+    lines.append("  Только рейтинг по результатам карт; форма, патч, состав и драфт пока не учитываются.")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="bk", description="Анализатор ставок Dota 2 — этап 0")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -155,6 +237,18 @@ def main(argv: list[str] | None = None) -> int:
     p_bc.add_argument("--url", default=None)
     p_bc.add_argument("--minutes", type=int, default=0, help="0 — пока не остановите Ctrl+C")
     p_bc.add_argument("--headless", action="store_true")
+
+    p_sm = sub.add_parser("sync-matches", help="загрузить историю про-карт из OpenDota")
+    p_sm.add_argument("--days", type=int, default=730)
+
+    p_re = sub.add_parser("rating-eval", help="проверить рейтинг на истории и показать топ команд")
+    p_re.add_argument("--eval-days", type=int, default=180, help="за сколько последних дней оценивать прогнозы")
+    p_re.add_argument("--top", type=int, default=20)
+
+    p_pr = sub.add_parser("predict", help="вероятность победы в серии по рейтингу")
+    p_pr.add_argument("team1")
+    p_pr.add_argument("team2")
+    p_pr.add_argument("--bo", type=int, default=3, choices=[1, 2, 3, 5])
 
     p_co = sub.add_parser("collect-odds", help="сохранять снимки коэффициентов OddsPapi в SQLite")
     p_co.add_argument("--interval", type=int, default=600, help="секунд между снимками")
@@ -187,6 +281,23 @@ def main(argv: list[str] | None = None) -> int:
 
         conn = db.connect(Path(s.db_path))
         betboom.collect(conn, args.url or betboom.DOTA_URL, minutes=args.minutes, headless=args.headless)
+        return 0
+
+    if args.cmd == "sync-matches":
+        from . import history
+
+        conn = db.connect(Path(s.db_path))
+        od = OpenDota(make_client(s.user_agent), s.opendota_api_key)
+        print(f"Лиг: {history.sync_leagues(conn, od)}")
+        print(f"Новых карт: {history.sync_pro_maps(conn, od, args.days)}")
+        return 0
+
+    if args.cmd == "rating-eval":
+        print(rating_report(db.connect(Path(s.db_path)), args.eval_days, args.top))
+        return 0
+
+    if args.cmd == "predict":
+        print(predict_report(db.connect(Path(s.db_path)), args.team1, args.team2, args.bo))
         return 0
 
     if args.cmd == "collect-odds":
