@@ -190,9 +190,14 @@ def run_bot(s: Settings, collect: bool = True, interval: int = 600) -> int:
         threading.Thread(target=collector, daemon=True).start()
     bot = Bot(db.connect(Path(s.db_path)), s.telegram_allowed_ids,
               Thresholds(s.signal_min_ev, s.signal_min_prob, s.signal_min_odds), s.timezone)
+    from .bot import check_telegram, make_telegram_client
+
+    tg = make_telegram_client(s.telegram_proxy)
+    status = check_telegram(s.telegram_bot_token, tg)
+    print(f"Telegram{' через прокси' if s.telegram_proxy else ''}: {status}")
     print("Бот запущен. Напишите ему /today в Telegram. Остановить: Ctrl+C")
     try:
-        run_polling(s.telegram_bot_token, bot)
+        run_polling(s.telegram_bot_token, bot, tg)
     except KeyboardInterrupt:
         pass
     return 0

@@ -23,6 +23,7 @@ class Settings:
     timezone: str = "Europe/Moscow"
     telegram_bot_token: str = ""
     telegram_allowed_ids: tuple[int, ...] = field(default_factory=tuple)
+    telegram_proxy: str = ""
     contact: str = "github.com/BaturinIgor/analysisOfTeamsAndBets"
     db_path: Path = Path("data/bk.sqlite3")
 
@@ -52,6 +53,7 @@ def load_settings(env_file: str | os.PathLike | None = ".env") -> Settings:
         timezone=g("TIMEZONE", "") or "Europe/Moscow",
         telegram_bot_token=g("TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_ids=_ids(g("TELEGRAM_ALLOWED_IDS", "")),
+        telegram_proxy=g("TELEGRAM_PROXY", ""),
         contact=g("CONTACT", "github.com/BaturinIgor/analysisOfTeamsAndBets"),
         db_path=Path(g("DB_PATH", "data/bk.sqlite3")),
     )

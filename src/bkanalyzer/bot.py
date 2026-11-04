@@ -237,25 +237,47 @@ COMMANDS = [
 ]
 
 
-def run_polling(token: str, bot: Bot, client: httpx.Client | None = None, log=print, stop=lambda: False) -> None:
-    client = client or httpx.Client(timeout=60)
+def make_telegram_client(proxy: str = "") -> httpx.Client:
+    return httpx.Client(timeout=60, proxy=proxy or None)
+
+
+def check_telegram(token: str, client: httpx.Client) -> str:
+    """Проверка связи и токена: getMe."""
+    try:
+        data = client.get(f"{API}/bot{token}/getMe", timeout=15).json()
+    except (httpx.HTTPError, ValueError) as exc:
+        return f"нет связи с api.telegram.org: {exc}"
+    if not data.get("ok"):
+        return f"Telegram отклонил токен: {data.get('description')}"
+    return f"ok, бот @{data['result'].get('username')}"
+
+
+def run_polling(token: str, bot: Bot, client: httpx.Client | None = None, log=print, stop=lambda: False, sleep=time.sleep) -> None:
+    client = client or make_telegram_client()
     base = f"{API}/bot{token}"
     try:
         client.post(f"{base}/setMyCommands", json={"commands": [{"command": c, "description": d} for c, d in COMMANDS]})
     except httpx.HTTPError:
         pass
     offset = 0
+    fails = 0
     while not stop():
         try:
             resp = client.get(f"{base}/getUpdates", params={"timeout": 50, "offset": offset})
             data = resp.json()
         except (httpx.HTTPError, ValueError) as exc:
-            log(f"Telegram недоступен: {exc}")
-            time.sleep(5)
+            fails += 1
+            if fails == 1 or fails % 20 == 0:
+                log(f"Telegram недоступен ({fails} раз подряд): {exc}. "
+                    "Если так постоянно — включите VPN или задайте TELEGRAM_PROXY в .env")
+            sleep(min(60, 5 * fails))
             continue
+        if fails:
+            log("Связь с Telegram восстановлена")
+            fails = 0
         if not data.get("ok"):
             log(f"Telegram: {data.get('description')}")
-            time.sleep(5)
+            sleep(5)
             continue
         for upd in data.get("result", []):
             offset = upd["update_id"] + 1
