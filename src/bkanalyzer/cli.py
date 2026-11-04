@@ -12,6 +12,7 @@ from . import db
 from .config import Settings, load_settings
 from .http import SourceError, make_client
 from .sources.liquipedia import Liquipedia
+from .sources import oddiwire as ow_mod
 from .sources.oddiwire import OddiWire, find_dota_sport
 from .sources.oddspapi import OddsPapi, find_bookmakers, flatten_odds
 from .sources.opendota import OpenDota
@@ -85,6 +86,38 @@ def collect_odds_once(s: Settings, conn, client=None) -> int:
             print(f"  {fid}: {exc}")
             continue
         saved += db.save_odds(conn, rows, source="oddspapi", fixture=fx)
+    return saved
+
+
+def collect_oddiwire_once(conn, ow: OddiWire, maps: bool = True, log=print) -> int:
+    """Один снимок линии Dota из OddiWire: до матча и в эфире.
+
+    Список матчей берём на tier=1 (там победа в матче). Победа на картах лежит в tier=3,
+    поэтому по каждому матчу дозапрашиваем get_fixture (если maps=True).
+    """
+    events: dict[str, dict] = {}
+    for tool in ("get_prematch_odds", "get_live_odds"):
+        payload = ow.call(tool, {"sport": ow_mod.DOTA2, "tier": 1, "limit": 100})
+        if isinstance(payload, dict) and payload.get("_note"):
+            log(f"  {tool}: {payload['_note']}")
+        for ev in ow_mod.board_events(payload):
+            if ev.get("sport", ow_mod.DOTA2) == ow_mod.DOTA2 and ev.get("event_id"):
+                events[str(ev["event_id"])] = ev
+    rows: list[dict] = []
+    for eid, ev in events.items():
+        if maps:
+            try:
+                full = ow.call("get_fixture", {"fixture_id": eid, "tier": 3})
+                if isinstance(full, dict):
+                    full = full.get("event", full)
+                    if isinstance(full, dict) and full.get("markets"):
+                        ev = {**ev, "markets": full["markets"]}
+            except SourceError as exc:
+                log(f"  {ev.get('name', eid)}: карты не получены ({exc})")
+        rows += ow_mod.event_rows(ev)
+    db.upsert_matches(conn, [ow_mod.event_match(e) for e in events.values()], source="oddiwire")
+    saved = db.save_feed_rows(conn, rows, source="oddiwire")
+    log(f"  матчей: {len(events)}, коэффициентов в снимке: {len(rows)}, новых/изменившихся: {saved}")
     return saved
 
 
@@ -368,8 +401,10 @@ def main(argv: list[str] | None = None) -> int:
     p_pr.add_argument("team2")
     p_pr.add_argument("--bo", type=int, default=3, choices=[1, 2, 3, 5])
 
-    p_co = sub.add_parser("collect-odds", help="сохранять снимки коэффициентов OddsPapi в SQLite")
+    p_co = sub.add_parser("collect-odds", help="сохранять снимки коэффициентов Dota (OddiWire) в SQLite")
     p_co.add_argument("--interval", type=int, default=600, help="секунд между снимками")
+    p_co.add_argument("--source", choices=["oddiwire", "oddspapi"], default="oddiwire")
+    p_co.add_argument("--no-maps", action="store_true", help="не запрашивать коэффициенты на карты (меньше запросов)")
     p_co.add_argument("--once", action="store_true")
 
     args = parser.parse_args(argv)
@@ -427,12 +462,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "collect-odds":
         conn = db.connect(Path(s.db_path))
+        ow = OddiWire(make_client(s.user_agent), s.oddiwire_api_key)
         while True:
             try:
-                n = collect_odds_once(s, conn)
+                if args.source == "oddiwire":
+                    n = collect_oddiwire_once(conn, ow, maps=not args.no_maps)
+                else:
+                    n = collect_odds_once(s, conn)
                 print(f"{time.strftime('%H:%M:%S')} сохранено {n} коэффициентов")
             except SourceError as exc:
                 print(f"{time.strftime('%H:%M:%S')} ошибка: {exc}", file=sys.stderr)
+                ow.reset()  # сессия MCP могла истечь — следующий снимок откроет новую
             if args.once:
                 return 0
             time.sleep(args.interval)

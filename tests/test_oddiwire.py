@@ -98,3 +98,90 @@ def test_sample(tmp_path):
     assert dump["get_coverage"]["args"] == {}
     assert dump["get_live_odds"]["args"] == {"sport": "DOTA2", "limit": 10}
     assert set(dump) == {"tools", "get_my_plan", "list_sports", "get_coverage", "get_prematch_odds", "get_live_odds"}
+
+
+from bkanalyzer import db
+from bkanalyzer.cli import collect_oddiwire_once
+from bkanalyzer.sources import oddiwire as owm
+
+
+def sel(name, price, prob, pid):
+    return {"name": name, "status": "TRADING", "price": price, "probability": prob, "provider_id": pid}
+
+
+EVENT = {
+    "event_id": "a749",
+    "sport": "DOTA2",
+    "league": "Asgard Championship Season 2",
+    "event_type": "live",
+    "status": "LIVE",
+    "name": "Team Allied vs Team Lynx",
+    "home": "Team Allied",
+    "away": "Team Lynx",
+    "starts": "2026-11-04T20:01:24.000Z",
+    "score": {"home": "0", "away": "0"},
+    "markets": [
+        {"market": "Match Winner - Twoway", "canonical": "match_winner", "tier": 1, "status": "OPEN", "selections": [
+            sel("Team Allied", 2.2, 0.404, "od:match:3386795/1/1?variant=way:two"),
+            sel("Team Lynx", 1.58, 0.596, "od:match:3386795/1/2?variant=way:two")]},
+        {"market": "Match Handicap", "canonical": "main_handicap", "tier": 1, "status": "OPEN", "selections": [
+            sel("-1.5", 1.32, 0.718, "od:match:3386795/2/1?handicap=-1.5")]},
+    ],
+}
+MAPS = [
+    {"market": "Map 1 Winner - Twoway", "canonical": None, "tier": 3, "status": "OPEN", "selections": [
+        sel("Team Allied", 1.68, 0.555, "x"), sel("Team Lynx", 2.05, 0.445, "y")]},
+    {"market": "Map 2 Winner - Twoway", "canonical": None, "tier": 3, "status": "SUSPENDED", "selections": [
+        sel("Team Allied", 2.4, 0.363, "x")]},
+]
+
+
+def test_event_rows():
+    rows = owm.event_rows(EVENT)
+    assert [(r["market"], r["outcome"], r["price"]) for r in rows] == [("match_winner", "Team Allied", 2.2), ("match_winner", "Team Lynx", 1.58)]
+    assert rows[0]["phase"] == "live" and rows[0]["fair_prob"] == 0.404
+    assert owm.feed_id(EVENT) == "od:match:3386795"
+    assert owm.event_match(EVENT)["score"] == "0:0"
+    rows = owm.event_rows({**EVENT, "markets": EVENT["markets"] + MAPS})
+    assert {r["market"] for r in rows} == {"match_winner", "map_1_winner"}
+
+
+class FakeOW:
+    def __init__(self, live, prematch=(), fixture_markets=None):
+        self.live, self.prematch, self.fixture_markets, self.calls = live, prematch, fixture_markets, []
+
+    def call(self, name, args=None):
+        self.calls.append((name, args))
+        if name == "get_live_odds":
+            return {"count": len(self.live), "events": list(self.live)}
+        if name == "get_prematch_odds":
+            return {"count": 0, "events": list(self.prematch)}
+        if name == "get_fixture":
+            return {**EVENT, "markets": EVENT["markets"] + (self.fixture_markets or [])}
+        raise AssertionError(name)
+
+
+def test_collect_and_latest(tmp_path):
+    conn = db.connect(tmp_path / "bk.sqlite3")
+    ow = FakeOW([EVENT], fixture_markets=MAPS)
+    assert collect_oddiwire_once(conn, ow, log=lambda *_: None) == 4
+    assert ("get_live_odds", {"sport": "DOTA2", "tier": 1, "limit": 100}) in ow.calls
+    assert ("get_fixture", {"fixture_id": "a749", "tier": 3}) in ow.calls
+    # повторный снимок без изменений ничего не добавляет
+    assert collect_oddiwire_once(conn, ow, log=lambda *_: None) == 0
+    feed = conn.execute("SELECT feed_id, team1 FROM bookmaker_matches WHERE source='oddiwire'").fetchone()
+    assert feed == ("od:match:3386795", "Team Allied")
+    # порядок команд в запросе обратный — коэффициенты должны развернуться
+    assert db.latest_winner_odds(conn, "team lynx", "Team Allied") == [("oddin (линия BetBoom)", 1.58, 2.2)]
+
+
+def test_migration_adds_columns(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.sqlite3"
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE odds_snapshots (id INTEGER PRIMARY KEY, taken_at TEXT NOT NULL, source TEXT NOT NULL, bookmaker TEXT NOT NULL, fixture_id TEXT NOT NULL, start_time TEXT, participant1 TEXT, participant2 TEXT, market TEXT NOT NULL, outcome TEXT NOT NULL, price REAL NOT NULL)")
+    old.commit()
+    old.close()
+    cols = {r[1] for r in db.connect(path).execute("PRAGMA table_info(odds_snapshots)")}
+    assert {"phase", "fair_prob"} <= cols
