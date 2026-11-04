@@ -142,6 +142,62 @@ def next_pause(used: int, limit: int, now_utc=None, min_interval: int = 600, per
     snapshots = remaining // per_snapshot
     return max(float(min_interval), seconds_left / snapshots)
 
+def run_collector(s: Settings, conn, interval: int = 600, maps: bool = True, once: bool = False, stop=lambda: False, log=print) -> int:
+    """Цикл сбора OddiWire: держит дневную квоту и ждёт, когда сервис просит подождать."""
+    from .sources.oddiwire import RateLimited
+
+    ow = OddiWire(make_client(s.user_agent), s.oddiwire_api_key)
+    if not s.oddiwire_api_key:
+        log("ODDIWIRE_API_KEY не задан: работаем на общем демо-ключе (10 запросов за 5 минут на всех).")
+    while not stop():
+        pause = float(interval)
+        try:
+            used, limit = ow.budget()
+            n = collect_oddiwire_once(conn, ow, maps=maps, max_calls=max(0, limit - used), log=log)
+            used, limit = ow.budget()
+            pause = next_pause(used, limit, min_interval=interval)
+            log(f"{time.strftime('%H:%M:%S')} сохранено {n}; квота {used}/{limit}; следующий снимок через {pause / 60:.0f} мин")
+        except RateLimited as exc:
+            pause = exc.retry_after + 5
+            log(f"{time.strftime('%H:%M:%S')} {exc}")
+        except SourceError as exc:
+            log(f"{time.strftime('%H:%M:%S')} ошибка: {exc}")
+            ow.reset()  # сессия MCP могла истечь — следующий снимок откроет новую
+        if once:
+            return 0
+        deadline = time.monotonic() + pause
+        while time.monotonic() < deadline and not stop():
+            time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
+    return 0
+
+
+def run_bot(s: Settings, collect: bool = True, interval: int = 600) -> int:
+    import threading
+
+    from .analysis import Thresholds
+    from .bot import Bot, run_polling
+
+    if not s.telegram_bot_token:
+        print("Нет TELEGRAM_BOT_TOKEN в .env")
+        return 1
+    if not s.telegram_allowed_ids:
+        print("Нет TELEGRAM_ALLOWED_IDS в .env — бот никому не ответит")
+        return 1
+    if collect:
+        def collector():
+            run_collector(s, db.connect(Path(s.db_path)), interval, log=lambda m: print(f"[линия] {m}"))
+
+        threading.Thread(target=collector, daemon=True).start()
+    bot = Bot(db.connect(Path(s.db_path)), s.telegram_allowed_ids,
+              Thresholds(s.signal_min_ev, s.signal_min_prob, s.signal_min_odds), s.timezone)
+    print("Бот запущен. Напишите ему /today в Telegram. Остановить: Ctrl+C")
+    try:
+        run_polling(s.telegram_bot_token, bot)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 def oddspapi_sample(s: Settings, client=None) -> str:
     """Рынки и исходы одного ближайшего матча Dota в OddsPapi — по ним настраиваем ODDSPAPI_WINNER_MARKET."""
     client = client or make_client(s.user_agent)
@@ -426,6 +482,10 @@ def main(argv: list[str] | None = None) -> int:
     p_co.add_argument("--interval", type=int, default=600, help="секунд между снимками")
     p_co.add_argument("--source", choices=["oddiwire", "oddspapi"], default="oddiwire")
     p_co.add_argument("--no-maps", action="store_true", help="не запрашивать коэффициенты на карты (меньше запросов)")
+
+    p_bot = sub.add_parser("bot", help="запустить Telegram-бота (и сбор коэффициентов в фоне)")
+    p_bot.add_argument("--no-collect", action="store_true", help="не собирать коэффициенты в этом же процессе")
+    p_bot.add_argument("--interval", type=int, default=600, help="минимальная пауза между снимками линии, секунд")
     p_co.add_argument("--once", action="store_true")
 
     args = parser.parse_args(argv)
@@ -492,28 +552,11 @@ def main(argv: list[str] | None = None) -> int:
                 if args.once:
                     return 0
                 time.sleep(args.interval)
-        from .sources.oddiwire import RateLimited
+        return run_collector(s, conn, args.interval, maps=not args.no_maps, once=args.once)
 
-        ow = OddiWire(make_client(s.user_agent), s.oddiwire_api_key)
-        if not s.oddiwire_api_key:
-            print("ODDIWIRE_API_KEY не задан: работаем на общем демо-ключе (10 запросов за 5 минут на всех).")
-        while True:
-            pause = float(args.interval)
-            try:
-                used, limit = ow.budget()
-                n = collect_oddiwire_once(conn, ow, maps=not args.no_maps, max_calls=max(0, limit - used))
-                used, limit = ow.budget()
-                pause = next_pause(used, limit, min_interval=args.interval)
-                print(f"{time.strftime('%H:%M:%S')} сохранено {n}; квота {used}/{limit}; следующий снимок через {pause / 60:.0f} мин")
-            except RateLimited as exc:
-                pause = exc.retry_after + 5
-                print(f"{time.strftime('%H:%M:%S')} {exc}", file=sys.stderr)
-            except SourceError as exc:
-                print(f"{time.strftime('%H:%M:%S')} ошибка: {exc}", file=sys.stderr)
-                ow.reset()  # сессия MCP могла истечь — следующий снимок откроет новую
-            if args.once:
-                return 0
-            time.sleep(pause)
+    if args.cmd == "bot":
+        return run_bot(s, collect=not args.no_collect, interval=args.interval)
+
     return 2
 
 
