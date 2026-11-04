@@ -35,6 +35,10 @@ class OpenDota:
     def teams(self) -> list[dict]:
         return self._get("/teams")
 
+    def leagues(self) -> list[dict]:
+        """Все лиги с уровнем: premium (Tier 1), professional (Tier 2), amateur."""
+        return self._get("/leagues")
+
     def hero_stats(self) -> list[dict]:
         """Статистика героев: pro_pick/pro_win и по рангам (8_pick/8_win = Immortal)."""
         return self._get("/heroStats")
