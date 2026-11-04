@@ -170,10 +170,13 @@ def oddiwire_sample(s: Settings, client=None, out: Path | None = Path("data/oddi
         sport = find_dota_sport(dump.get("list_sports"))
         lines.append(f"Dota 2 в list_sports: {sport or 'не найдена'}")
         if sport:
-            for name in ("get_coverage", "get_prematch_odds"):
+            for name in ("get_coverage", "get_prematch_odds", "get_live_odds"):
                 arg = _sport_arg(tools, name)
+                args = {arg: sport} if arg else {}
+                if name != "get_coverage":
+                    args["limit"] = 10
                 try:
-                    dump[name] = ow.call(name, {arg: sport} if arg else {})
+                    dump[name] = ow.call(name, args)
                 except SourceError as exc:
                     dump[name] = f"ошибка: {exc}"
     except SourceError as exc:

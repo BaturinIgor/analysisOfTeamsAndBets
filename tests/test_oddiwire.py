@@ -10,9 +10,10 @@ from bkanalyzer.sources.oddiwire import OddiWire, find_dota_sport, tool_payload
 
 TOOLS = [
     {"name": "list_sports", "inputSchema": {"properties": {}}},
-    {"name": "get_coverage", "inputSchema": {"properties": {"sport": {"type": "string"}}}},
+    {"name": "get_coverage", "inputSchema": {"properties": {}}},
     {"name": "get_prematch_odds", "inputSchema": {"properties": {"sport": {"type": "string"}, "limit": {}}}},
     {"name": "get_my_plan", "inputSchema": {"properties": {}}},
+    {"name": "get_live_odds", "inputSchema": {"properties": {"sport": {"type": "string"}, "limit": {}}}},
 ]
 
 
@@ -32,9 +33,10 @@ def make_server(sse: bool = False):
         else:
             name, args = body["params"]["name"], body["params"]["arguments"]
             data = {
-                "list_sports": {"sports": [{"id": "CS2", "name": "Counter-Strike 2"}, {"id": "DOTA2", "name": "Dota 2"}]},
+                "list_sports": {"sports": ["CS2", "DOTA2", "DOTA2_DUELS"], "note": "ids"},
                 "get_my_plan": {"plan": "demo"},
-                "get_coverage": {"sport": args.get("sport"), "prematch": 7},
+                "get_coverage": {"args": args, "DOTA2": {"prematch": 7}},
+                "get_live_odds": {"fixtures": [], "args": args},
                 "get_prematch_odds": {"fixtures": [{"home": "Team Spirit", "away": "Tundra", "odds": [1.7, 2.1]}]},
             }[name]
             result = {"content": [{"type": "text", "text": json.dumps(data)}]}
@@ -81,6 +83,9 @@ def test_payload_and_sport():
     assert find_dota_sport(["CS2", "DOTA_2"]) == "DOTA_2"
     assert find_dota_sport("Valid ids: SOCCER, CS2, DOTA2") == "DOTA2"
     assert find_dota_sport({"sports": []}) is None
+    real = {"sports": ["CS2", "DOTA2", "DOTA2_DUELS", "LOL"], "note": "These are the sport ids this wire understands."}
+    assert find_dota_sport(real) == "DOTA2"
+    assert find_dota_sport({"sports": ["DOTA2_DUELS"]}) is None
 
 
 def test_sample(tmp_path):
@@ -90,5 +95,6 @@ def test_sample(tmp_path):
     assert "Dota 2 в list_sports: DOTA2" in text
     assert "Team Spirit" in text
     dump = json.loads(out.read_text())
-    assert dump["get_coverage"]["sport"] == "DOTA2"
-    assert set(dump) == {"tools", "get_my_plan", "list_sports", "get_coverage", "get_prematch_odds"}
+    assert dump["get_coverage"]["args"] == {}
+    assert dump["get_live_odds"]["args"] == {"sport": "DOTA2", "limit": 10}
+    assert set(dump) == {"tools", "get_my_plan", "list_sports", "get_coverage", "get_prematch_odds", "get_live_odds"}
