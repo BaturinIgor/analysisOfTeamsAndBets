@@ -121,28 +121,32 @@ class OddiWire:
 
 
 def find_dota_sport(sports) -> str | None:
-    """Ищет id Dota 2 в ответе list_sports, какой бы формы он ни был."""
+    """Ищет id Dota 2 в ответе list_sports, например {"sports": ["CS2", "DOTA2", "DOTA2_DUELS"]}.
+
+    Берём сам id (короткая строка без пробелов), не «дуэли» и не описания.
+    """
+    found: list[str] = []
+
     def walk(x):
         if isinstance(x, dict):
-            yield x
+            name = " ".join(str(v) for v in x.values() if isinstance(v, str)).lower()
+            if "dota" in name and "duel" not in name:
+                for key in ("id", "sport_id", "sportId", "key", "code"):
+                    if isinstance(x.get(key), (str, int)):
+                        found.append(str(x[key]))
             for v in x.values():
-                yield from walk(v)
+                walk(v)
         elif isinstance(x, list):
             for v in x:
-                yield from walk(v)
+                walk(v)
+        elif isinstance(x, str):
+            for token in x.replace(",", " ").split():
+                token = token.strip("\"'`.;:()")
+                if "dota" in token.lower() and "duel" not in token.lower():
+                    found.append(token)
 
-    for item in walk(sports):
-        blob = " ".join(str(v) for v in item.values() if isinstance(v, (str, int)))
-        if "dota" in blob.lower():
-            for key in ("id", "sport_id", "sportId", "sport", "key", "code"):
-                if isinstance(item.get(key), (str, int)):
-                    return str(item[key])
-    if isinstance(sports, str):
-        for token in sports.replace(",", " ").split():
-            if "dota" in token.lower():
-                return token.strip("\"'`")
-    if isinstance(sports, list):
-        for v in sports:
-            if isinstance(v, str) and "dota" in v.lower():
-                return v
-    return None
+    walk(sports)
+    for cand in found:
+        if cand.upper() == "DOTA2":
+            return cand
+    return found[0] if found else None
