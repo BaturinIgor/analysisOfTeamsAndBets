@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from . import analysis, rating
+from . import analysis, rating, sim as simmod
 from .analysis import Analysis, Thresholds, market_label
 
 API = "https://api.telegram.org"
@@ -26,12 +26,13 @@ HELP = """Анализатор ставок Dota 2
 /match N — подробный разбор матча N из /today
 /value — сигналы: перевес (EV) не меньше порога
 /team название — рейтинг команды
+/sim — бумажные ставки: банк, ROI, CLV
 /settings — текущие пороги
 
 Коэффициенты: линия Oddin (на ней работает BetBoom), обновляется автоматически.
 Вероятности: рейтинг Elo по картам Tier 1–2. Форма, патч, состав и драфт пока не учитываются."""
 
-LATER = "Появится на следующем этапе (симулятор и выгрузка)."
+LATER = "Выгрузка в xlsx появится на следующем шаге."
 
 
 class ModelCache:
@@ -75,7 +76,8 @@ def _team(name: str, st) -> str:
 
 class Bot:
     def __init__(self, conn: sqlite3.Connection, allowed_ids: tuple[int, ...], thresholds: Thresholds | None = None,
-                 tz: str = "Europe/Moscow", now=None):
+                 tz: str = "Europe/Moscow", now=None, sim: simmod.SimSettings | None = None):
+        self.sim = sim or simmod.SimSettings()
         self.conn = conn
         self.allowed = set(allowed_ids)
         self.thresholds = thresholds or Thresholds()
@@ -185,8 +187,10 @@ class Bot:
 
     def settings(self) -> str:
         t = self.thresholds
+        c = self.sim
         return (f"Пороги сигнала: EV ≥ {t.min_ev:.0%}, вероятность ≥ {t.min_prob:.0%}, коэффициент ≥ {t.min_odds:.2f}.\n"
-                "Меняются в .env: SIGNAL_MIN_EV, SIGNAL_MIN_PROB, SIGNAL_MIN_ODDS (например 0.05, 0.9, 1.5).")
+                f"Симулятор: банк {c.bank:.0f}, стратегия {c.strategy} (сумма {c.stake:.0f} / {c.percent:.0%} банка / {c.kelly:.2f} Келли).\n"
+                "Меняются в .env: SIGNAL_MIN_EV, SIGNAL_MIN_PROB, SIGNAL_MIN_ODDS, SIM_BANK, SIM_STRATEGY, SIM_STAKE, SIM_PERCENT, SIM_KELLY.")
 
     def handle(self, user_id: int, text: str) -> str | None:
         if user_id not in self.allowed:
@@ -209,7 +213,9 @@ class Bot:
                 return self.team(arg)
             if cmd == "/settings":
                 return self.settings()
-            if cmd in ("/sim", "/export"):
+            if cmd == "/sim":
+                return simmod.report(self.conn, self.sim)
+            if cmd == "/export":
                 return LATER
         except Exception as exc:  # бот не должен падать из-за одной команды
             return f"Ошибка: {exc}"
@@ -232,9 +238,20 @@ COMMANDS = [
     ("match", "разбор матча: /match N"),
     ("value", "сигналы с перевесом"),
     ("team", "рейтинг команды"),
+    ("sim", "симулятор бумажных ставок"),
     ("settings", "пороги сигнала"),
     ("help", "справка"),
 ]
+
+
+def send_message(client: httpx.Client, token: str, chat_id: int, text: str) -> bool:
+    ok = True
+    for part in chunks(text):
+        try:
+            client.post(f"{API}/bot{token}/sendMessage", json={"chat_id": chat_id, "text": part, "disable_web_page_preview": True})
+        except httpx.HTTPError:
+            ok = False
+    return ok
 
 
 def make_telegram_client(proxy: str = "") -> httpx.Client:

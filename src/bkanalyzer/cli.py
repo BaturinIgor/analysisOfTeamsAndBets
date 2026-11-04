@@ -142,11 +142,43 @@ def next_pause(used: int, limit: int, now_utc=None, min_interval: int = 600, per
     snapshots = remaining // per_snapshot
     return max(float(min_interval), seconds_left / snapshots)
 
-def run_collector(s: Settings, conn, interval: int = 600, maps: bool = True, once: bool = False, stop=lambda: False, log=print) -> int:
+def simulate_step(s: Settings, conn, models, od=None, last_sync: list | None = None, notify=None, log=print) -> None:
+    """После снимка линии: бумажные ставки по сигналам, обновление результатов и расчёт ставок."""
+    from . import analysis, history, sim
+
+    if od is not None and last_sync is not None and time.monotonic() - last_sync[0] > 3600:
+        try:
+            added = history.sync_pro_maps(conn, od, 730, log=lambda *_: None)
+            last_sync[0] = time.monotonic()
+            if added:
+                log(f"  новых карт из OpenDota: {added}")
+        except SourceError as exc:
+            log(f"  OpenDota: {exc}")
+    model, _ = models.get(conn)
+    board = analysis.load_board(conn)
+    now = int(time.time())
+    analyses = [analysis.analyze(m, model, now) for m in board]
+    cfg = s.sim()
+    for b in sim.place_bets(conn, analyses, s.thresholds(), cfg):
+        log("  " + sim.placed_message(b))
+        if notify:
+            notify(sim.placed_message(b))
+    for b in sim.settle(conn):
+        log("  " + sim.settled_message(b))
+        if notify:
+            notify(sim.settled_message(b))
+
+
+def run_collector(s: Settings, conn, interval: int = 600, maps: bool = True, once: bool = False, stop=lambda: False, log=print,
+                  simulate: bool = False, notify=None) -> int:
     """Цикл сбора OddiWire: держит дневную квоту и ждёт, когда сервис просит подождать."""
     from .sources.oddiwire import RateLimited
 
+    from .bot import ModelCache
+
     ow = OddiWire(make_client(s.user_agent), s.oddiwire_api_key)
+    models, last_sync = ModelCache(), [0.0]
+    od = OpenDota(make_client(s.user_agent), s.opendota_api_key) if simulate else None
     if not s.oddiwire_api_key:
         log("ODDIWIRE_API_KEY не задан: работаем на общем демо-ключе (10 запросов за 5 минут на всех).")
     while not stop():
@@ -157,12 +189,16 @@ def run_collector(s: Settings, conn, interval: int = 600, maps: bool = True, onc
             used, limit = ow.budget()
             pause = next_pause(used, limit, min_interval=interval)
             log(f"{time.strftime('%H:%M:%S')} сохранено {n}; квота {used}/{limit}; следующий снимок через {pause / 60:.0f} мин")
+            if simulate:
+                simulate_step(s, conn, models, od, last_sync, notify, log)
         except RateLimited as exc:
             pause = exc.retry_after + 5
             log(f"{time.strftime('%H:%M:%S')} {exc}")
         except SourceError as exc:
             log(f"{time.strftime('%H:%M:%S')} ошибка: {exc}")
-            ow.reset()  # сессия MCP могла истечь — следующий снимок откроет новую
+            ow.reset()
+        except Exception as exc:  # сбор не должен останавливаться из-за ошибки анализа
+            log(f"{time.strftime('%H:%M:%S')} сбой: {exc!r}")  # сессия MCP могла истечь — следующий снимок откроет новую
         if once:
             return 0
         deadline = time.monotonic() + pause
@@ -174,7 +210,6 @@ def run_collector(s: Settings, conn, interval: int = 600, maps: bool = True, onc
 def run_bot(s: Settings, collect: bool = True, interval: int = 600) -> int:
     import threading
 
-    from .analysis import Thresholds
     from .bot import Bot, run_polling
 
     if not s.telegram_bot_token:
@@ -183,16 +218,21 @@ def run_bot(s: Settings, collect: bool = True, interval: int = 600) -> int:
     if not s.telegram_allowed_ids:
         print("Нет TELEGRAM_ALLOWED_IDS в .env — бот никому не ответит")
         return 1
-    if collect:
-        def collector():
-            run_collector(s, db.connect(Path(s.db_path)), interval, log=lambda m: print(f"[линия] {m}"))
-
-        threading.Thread(target=collector, daemon=True).start()
-    bot = Bot(db.connect(Path(s.db_path)), s.telegram_allowed_ids,
-              Thresholds(s.signal_min_ev, s.signal_min_prob, s.signal_min_odds), s.timezone)
-    from .bot import check_telegram, make_telegram_client
+    from .bot import check_telegram, make_telegram_client, send_message
 
     tg = make_telegram_client(s.telegram_proxy)
+    if collect:
+        notify_client = make_telegram_client(s.telegram_proxy)
+
+        def notify(text: str) -> None:
+            for chat in s.telegram_allowed_ids:
+                send_message(notify_client, s.telegram_bot_token, chat, text)
+
+        def collector():
+            run_collector(s, db.connect(Path(s.db_path)), interval, log=lambda m: print(f"[линия] {m}"), simulate=True, notify=notify)
+
+        threading.Thread(target=collector, daemon=True).start()
+    bot = Bot(db.connect(Path(s.db_path)), s.telegram_allowed_ids, s.thresholds(), s.timezone, sim=s.sim())
     status = check_telegram(s.telegram_bot_token, tg)
     print(f"Telegram{' через прокси' if s.telegram_proxy else ''}: {status}")
     print("Бот запущен. Напишите ему /today в Telegram. Остановить: Ctrl+C")

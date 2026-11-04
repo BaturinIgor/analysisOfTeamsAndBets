@@ -21,6 +21,21 @@ class Settings:
     signal_min_prob: float = 0.0
     signal_min_odds: float = 1.0
     timezone: str = "Europe/Moscow"
+    sim_bank: float = 10000.0
+    sim_strategy: str = "fixed"
+    sim_stake: float = 100.0
+    sim_percent: float = 0.02
+    sim_kelly: float = 0.25
+
+    def sim(self):
+        from .sim import SimSettings
+
+        return SimSettings(self.sim_bank, self.sim_strategy, self.sim_stake, self.sim_percent, self.sim_kelly)
+
+    def thresholds(self):
+        from .analysis import Thresholds
+
+        return Thresholds(self.signal_min_ev, self.signal_min_prob, self.signal_min_odds)
     telegram_bot_token: str = ""
     telegram_allowed_ids: tuple[int, ...] = field(default_factory=tuple)
     telegram_proxy: str = ""
@@ -51,6 +66,11 @@ def load_settings(env_file: str | os.PathLike | None = ".env") -> Settings:
         signal_min_prob=float(g("SIGNAL_MIN_PROB", "") or 0.0),
         signal_min_odds=float(g("SIGNAL_MIN_ODDS", "") or 1.0),
         timezone=g("TIMEZONE", "") or "Europe/Moscow",
+        sim_bank=float(g("SIM_BANK", "") or 10000),
+        sim_strategy=(g("SIM_STRATEGY", "") or "fixed").lower(),
+        sim_stake=float(g("SIM_STAKE", "") or 100),
+        sim_percent=float(g("SIM_PERCENT", "") or 0.02),
+        sim_kelly=float(g("SIM_KELLY", "") or 0.25),
         telegram_bot_token=g("TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_ids=_ids(g("TELEGRAM_ALLOWED_IDS", "")),
         telegram_proxy=g("TELEGRAM_PROXY", ""),
