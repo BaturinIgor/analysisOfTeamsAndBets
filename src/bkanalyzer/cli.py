@@ -97,7 +97,7 @@ def inspect_run(run_dir: Path) -> str:
     by_url: dict[tuple[str, str], int] = {}
     seen: list[str] = []
     for item in index:
-        key = (item["url"].split("?")[0], item["dir"])
+        key = (item["url"].split("?")[0], item.get("dir", "in"))
         by_url[key] = by_url.get(key, 0) + 1
         path = run_dir / item["file"]
         if path.suffix == ".bin":
@@ -113,6 +113,27 @@ def inspect_run(run_dir: Path) -> str:
     return "\n".join(lines)
 
 
+def parse_run(run_dir: Path, conn=None) -> str:
+    """Матчи Dota 2 с коэффициентами на победу из записи разведки BetBoom."""
+    from .bookmakers.betboom_parse import parse_frame, snapshot_rows, winner_table
+
+    matches: dict = {}
+    outcomes: dict = {}
+    for path in sorted(run_dir.glob("*_in_*.bin")):
+        m, o = parse_frame(path.read_bytes())
+        matches.update({x["match_id"]: x for x in m})
+        outcomes.update({x["uid"]: x for x in o})
+    if conn is not None:
+        db.upsert_matches(conn, list(matches.values()), source="betboom")
+        db.save_price_changes(conn, snapshot_rows(list(outcomes.values())), source="betboom")
+    lines = [f"Матчей: {len(matches)}, исходов: {len(outcomes)}"]
+    for r in winner_table(list(matches.values()), list(outcomes.values())):
+        p1 = f"{r['p1']:.2f}" if r["p1"] else "  —  "
+        p2 = f"{r['p2']:.2f}" if r["p2"] else "  —  "
+        lines.append(f"  {(r['start_time'] or '')[:16]}  {r['team1']} — {r['team2']}  [{r['format'] or '?'}]  П1 {p1}  П2 {p2}")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="bk", description="Анализатор ставок Dota 2 — этап 0")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -125,6 +146,15 @@ def main(argv: list[str] | None = None) -> int:
 
     p_bi = sub.add_parser("betboom-inspect", help="кратко показать, что записала разведка BetBoom")
     p_bi.add_argument("run_dir", type=Path)
+
+    p_bp = sub.add_parser("betboom-parse", help="разобрать запись разведки: матчи и коэффициенты П1/П2")
+    p_bp.add_argument("run_dir", type=Path)
+    p_bp.add_argument("--save", action="store_true", help="сохранить коэффициенты в базу")
+
+    p_bc = sub.add_parser("betboom-collect", help="держать линию BetBoom открытой и писать изменения коэффициентов в базу")
+    p_bc.add_argument("--url", default=None)
+    p_bc.add_argument("--minutes", type=int, default=0, help="0 — пока не остановите Ctrl+C")
+    p_bc.add_argument("--headless", action="store_true")
 
     p_co = sub.add_parser("collect-odds", help="сохранять снимки коэффициентов OddsPapi в SQLite")
     p_co.add_argument("--interval", type=int, default=600, help="секунд между снимками")
@@ -145,6 +175,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "betboom-inspect":
         print(inspect_run(args.run_dir))
+        return 0
+
+    if args.cmd == "betboom-parse":
+        conn = db.connect(Path(s.db_path)) if args.save else None
+        print(parse_run(args.run_dir, conn))
+        return 0
+
+    if args.cmd == "betboom-collect":
+        from .bookmakers import betboom
+
+        conn = db.connect(Path(s.db_path))
+        betboom.collect(conn, args.url or betboom.DOTA_URL, minutes=args.minutes, headless=args.headless)
         return 0
 
     if args.cmd == "collect-odds":
