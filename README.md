@@ -88,6 +88,8 @@ bk sync-matches   # один раз (и потом раз в несколько 
 bk bot            # бот + сбор коэффициентов в одном окне; отдельный bk collect-odds тогда не нужен
 ```
 
+Если в логе «Telegram недоступен: Connection reset by peer» — провайдер режет `api.telegram.org`. Включите VPN на Mac или укажите прокси в `.env`: `TELEGRAM_PROXY=socks5://127.0.0.1:1080` (порт — из настроек вашего VPN/прокси-клиента). После `git pull` переустановите зависимости: `pip install -e '.[dev]'`.
+
 Команды в Telegram: `/today`, `/live`, `/match N`, `/value`, `/team название`, `/settings`. Бот отвечает только ID из `TELEGRAM_ALLOWED_IDS`. Пороги сигнала — `SIGNAL_MIN_EV`, `SIGNAL_MIN_PROB`, `SIGNAL_MIN_ODDS` в `.env`. Команды из линии сопоставляются с историей OpenDota по названию; если команды нет в Tier 1–2, бот честно пишет, что оценки нет.
 
 ## Тесты

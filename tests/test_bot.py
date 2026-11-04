@@ -130,3 +130,27 @@ def test_polling(bot):
     client = httpx.Client(transport=httpx.MockTransport(handler))
     run_polling("TOKEN", bot, client, log=lambda *_: None, stop=lambda: state["n"] >= 2)
     assert len(sent) == 1 and sent[0]["chat_id"] == ME and "/today" in sent[0]["text"]
+
+
+def test_polling_backoff_and_check(bot):
+    from bkanalyzer.bot import check_telegram, make_telegram_client
+
+    calls, logs, sleeps = {"n": 0}, [], []
+
+    def handler(req):
+        if req.url.path.endswith("/getUpdates"):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise httpx.ConnectError("Connection reset by peer")
+            return httpx.Response(200, json={"ok": True, "result": []})
+        if req.url.path.endswith("/getMe"):
+            return httpx.Response(200, json={"ok": True, "result": {"username": "bk_bot"}})
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    run_polling("T", bot, client, log=logs.append, stop=lambda: calls["n"] >= 3, sleep=sleeps.append)
+    assert sleeps == [5, 10]
+    assert len([l for l in logs if "недоступен" in l]) == 1 and "TELEGRAM_PROXY" in logs[0]
+    assert logs[-1] == "Связь с Telegram восстановлена"
+    assert check_telegram("T", client) == "ok, бот @bk_bot"
+    make_telegram_client("socks5://127.0.0.1:1080").close()  # socks-поддержка установлена
