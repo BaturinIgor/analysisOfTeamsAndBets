@@ -124,8 +124,9 @@ def collect_oddiwire_once(conn, ow: OddiWire, maps: bool = True, log=print, max_
             except SourceError as exc:
                 log(f"  {ev.get('name', eid)}: карты не получены ({exc})")
         rows += ow_mod.event_rows(ev)
-    db.upsert_matches(conn, [ow_mod.event_match(e) for e in events.values()], source="oddiwire")
-    saved = db.save_feed_rows(conn, rows, source="oddiwire")
+    stamp = db._now()  # одна метка на весь снимок: по ней видно, какие матчи и рынки сейчас в ленте
+    db.upsert_matches(conn, [ow_mod.event_match(e) for e in events.values()], source="oddiwire", updated_at=stamp)
+    saved = db.save_feed_rows(conn, rows, source="oddiwire", taken_at=stamp)
     log(f"  матчей: {len(events)}, коэффициентов в снимке: {len(rows)}, новых/изменившихся: {saved}")
     return saved
 
@@ -528,6 +529,9 @@ def main(argv: list[str] | None = None) -> int:
     p_co.add_argument("--source", choices=["oddiwire", "oddspapi"], default="oddiwire")
     p_co.add_argument("--no-maps", action="store_true", help="не запрашивать коэффициенты на карты (меньше запросов)")
 
+    p_sr = sub.add_parser("sim-reset", help="удалить все бумажные ставки и начать симулятор заново")
+    p_sr.add_argument("--yes", action="store_true", help="подтверждение")
+
     p_bot = sub.add_parser("bot", help="запустить Telegram-бота (и сбор коэффициентов в фоне)")
     p_bot.add_argument("--no-collect", action="store_true", help="не собирать коэффициенты в этом же процессе")
     p_bot.add_argument("--interval", type=int, default=600, help="минимальная пауза между снимками линии, секунд")
@@ -598,6 +602,20 @@ def main(argv: list[str] | None = None) -> int:
                     return 0
                 time.sleep(args.interval)
         return run_collector(s, conn, args.interval, maps=not args.no_maps, once=args.once)
+
+    if args.cmd == "sim-reset":
+        from . import sim
+
+        conn = db.connect(Path(s.db_path))
+        sim.ensure_schema(conn)
+        n = conn.execute("SELECT COUNT(*) FROM paper_bets").fetchone()[0]
+        if not args.yes:
+            print(f"Будет удалено бумажных ставок: {n}. Повторите с --yes")
+            return 1
+        conn.execute("DELETE FROM paper_bets")
+        conn.commit()
+        print(f"Удалено бумажных ставок: {n}. Симулятор начнётся заново.")
+        return 0
 
     if args.cmd == "bot":
         return run_bot(s, collect=not args.no_collect, interval=args.interval)

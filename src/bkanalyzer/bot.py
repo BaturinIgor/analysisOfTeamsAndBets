@@ -154,8 +154,10 @@ class Bot:
         if a.picks:
             lines.append("\nПеревес (EV = наша вероятность × коэфф. − 1):")
             for p in sorted(a.picks, key=lambda p: -p.ev):
-                flag = "✅" if self.thresholds.ok(p) else "  "
+                flag = "✅" if self.thresholds.ok(p) else "⚠️" if self.thresholds.suspicious(p) and p.ev > 0 else "  "
                 lines.append(f"{flag} {market_label(p.market)}: {p.team} @ {p.price:.2f} — наша {p.prob:.0%}, EV {p.ev:+.1%}")
+            if any(self.thresholds.suspicious(p) and p.ev > 0 for p in a.picks):
+                lines.append(f"⚠️ — модель расходится с рынком больше чем на {self.thresholds.max_gap:.0%}: скорее ошибается модель, ставки нет.")
             if not any(self.thresholds.ok(p) for p in a.picks):
                 lines.append("Ставки нет: перевес ниже порога.")
         lines.append("\nРиски: модель видит только результаты карт; форма, патч, замены и драфт пока не учитываются.")
@@ -188,9 +190,10 @@ class Bot:
     def settings(self) -> str:
         t = self.thresholds
         c = self.sim
-        return (f"Пороги сигнала: EV ≥ {t.min_ev:.0%}, вероятность ≥ {t.min_prob:.0%}, коэффициент ≥ {t.min_odds:.2f}.\n"
+        return (f"Пороги сигнала: EV ≥ {t.min_ev:.0%}, вероятность ≥ {t.min_prob:.0%}, коэффициент ≥ {t.min_odds:.2f}, "
+                f"расхождение с рынком ≤ {t.max_gap:.0%}.\n"
                 f"Симулятор: банк {c.bank:.0f}, стратегия {c.strategy} (сумма {c.stake:.0f} / {c.percent:.0%} банка / {c.kelly:.2f} Келли).\n"
-                "Меняются в .env: SIGNAL_MIN_EV, SIGNAL_MIN_PROB, SIGNAL_MIN_ODDS, SIM_BANK, SIM_STRATEGY, SIM_STAKE, SIM_PERCENT, SIM_KELLY.")
+                "Меняются в .env: SIGNAL_MIN_EV, SIGNAL_MIN_PROB, SIGNAL_MIN_ODDS, SIGNAL_MAX_GAP, SIM_BANK, SIM_STRATEGY, SIM_STAKE, SIM_PERCENT, SIM_KELLY.")
 
     def handle(self, user_id: int, text: str) -> str | None:
         if user_id not in self.allowed:

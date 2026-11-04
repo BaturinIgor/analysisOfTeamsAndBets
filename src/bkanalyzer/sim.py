@@ -92,6 +92,8 @@ def place_bets(conn: sqlite3.Connection, analyses: list[Analysis], thresholds: T
         if conn.execute("SELECT 1 FROM paper_bets WHERE fixture_id=? AND mode=?", (a.match.fixture_id, mode)).fetchone():
             continue
         best = max(picks, key=lambda p: p.ev)
+        if result_known(conn, a, best):
+            continue  # исход уже есть в OpenDota — линия устарела, ставить нельзя
         b = bank(conn, mode, cfg)
         stake = stake_for(cfg, b, best.price, best.prob)
         if stake <= 0:
@@ -111,6 +113,14 @@ def place_bets(conn: sqlite3.Connection, analyses: list[Analysis], thresholds: T
 
 
 # --- расчёт -------------------------------------------------------------------
+
+
+def result_known(conn: sqlite3.Connection, a: Analysis, pick) -> bool:
+    try:
+        maps = find_series(conn, a.match.team1, a.match.team2, a.match.start_time, datetime.now(timezone.utc).isoformat())
+    except sqlite3.OperationalError:  # истории карт ещё нет
+        return False
+    return bool(maps) and settle_result({"pick": pick.team, "market": pick.market}, maps) is not None
 
 BEST_OF = {0: 1, 1: 3, 2: 5, 3: 2}
 

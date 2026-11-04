@@ -33,6 +33,13 @@ CREATE TABLE IF NOT EXISTS bookmaker_matches (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (source, match_id)
 );
+CREATE TABLE IF NOT EXISTS feed_markets (   -- когда рынок последний раз был открыт в ленте
+    source TEXT NOT NULL,
+    fixture_id TEXT NOT NULL,
+    market TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    PRIMARY KEY (source, fixture_id, market)
+);
 CREATE INDEX IF NOT EXISTS ix_odds_fixture ON odds_snapshots (fixture_id, bookmaker, market, outcome, taken_at);
 """
 
@@ -136,6 +143,11 @@ def save_feed_rows(conn: sqlite3.Connection, rows: list[dict], *, source: str, t
            (taken_at, source, bookmaker, fixture_id, start_time, participant1, participant2, market, outcome, price, phase, fair_prob)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         new,
+    )
+    conn.executemany(
+        """INSERT INTO feed_markets (source, fixture_id, market, last_seen) VALUES (?, ?, ?, ?)
+           ON CONFLICT(source, fixture_id, market) DO UPDATE SET last_seen=excluded.last_seen""",
+        sorted({(source, r["fixture_id"], r["market"], taken_at) for r in rows}),
     )
     conn.commit()
     return len(new)

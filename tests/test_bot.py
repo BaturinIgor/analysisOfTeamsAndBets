@@ -30,8 +30,8 @@ def seed(conn):
         {"match_id": "e2", "feed_id": "od:match:2", "tournament_id": "Small Cup", "start_time": "2026-11-04T20:00:00Z", "team1": "Team Allied", "team2": "Team Lynx", "score": "1:0"},
     ], source="oddiwire", updated_at=ts)
     rows = [
-        {"bookmaker": "oddin", "fixture_id": "e1", "market": "match_winner", "outcome": "Spirit", "price": 1.9, "phase": "prematch", "fair_prob": 0.5},
-        {"bookmaker": "oddin", "fixture_id": "e1", "market": "match_winner", "outcome": "Tundra", "price": 1.9, "phase": "prematch", "fair_prob": 0.5},
+        {"bookmaker": "oddin", "fixture_id": "e1", "market": "match_winner", "outcome": "Spirit", "price": 1.9, "phase": "prematch", "fair_prob": 0.8},
+        {"bookmaker": "oddin", "fixture_id": "e1", "market": "match_winner", "outcome": "Tundra", "price": 1.9, "phase": "prematch", "fair_prob": 0.2},
         {"bookmaker": "oddin", "fixture_id": "e2", "market": "match_winner", "outcome": "Team Allied", "price": 1.5, "phase": "live", "fair_prob": 0.64},
         {"bookmaker": "oddin", "fixture_id": "e2", "market": "match_winner", "outcome": "Team Lynx", "price": 2.5, "phase": "live", "fair_prob": 0.36},
         {"bookmaker": "oddin", "fixture_id": "e2", "market": "map_2_winner", "outcome": "Team Allied", "price": 1.7, "phase": "live", "fair_prob": 0.55},
@@ -84,7 +84,7 @@ def test_match_detail(bot):
     assert "Team Allied — Team Lynx" in bot.handle(ME, "/match 1")
     text = bot.handle(ME, "/match 2")
     assert "Рейтинг: Spirit (" in text and "Наша вероятность" in text
-    assert "матч: Spirit 1.90 · 50%" in text
+    assert "матч: Spirit 1.90 · 80%" in text
     assert "EV +" in text
     other = bot.handle(ME, "/match lynx")
     assert "нет в истории" in other and "карта 2: Team Allied 1.70" in other
@@ -155,3 +155,36 @@ def test_polling_backoff_and_check(bot):
     assert logs[-1] == "Связь с Telegram восстановлена"
     assert check_telegram("T", client) == "ok, бот @bk_bot"
     make_telegram_client("socks5://127.0.0.1:1080").close()  # socks-поддержка установлена
+
+
+def test_guards(tmp_path):
+    from bkanalyzer.analysis import Pick
+
+    t = Thresholds(0.05)
+    assert t.suspicious(Pick("match_winner", "A", 3.8, 0.51, 0.26)) and not t.ok(Pick("match_winner", "A", 3.8, 0.51, 0.26))
+    assert t.ok(Pick("match_winner", "A", 2.0, 0.6, 0.5))
+    # в эфире при счёте 1:0 идёт карта 2 — ставим только на карту 3 и матч
+    m = rating.EloModel()
+    m.update(1, 2, 0, "Team Allied", "Team Lynx")
+    from bkanalyzer.analysis import BoardMatch, Quote
+    bm = BoardMatch("e", "Team Allied", "Team Lynx", None, None, "1:0", "live")
+    for mk in ("map_2_winner", "map_3_winner", "match_winner"):
+        bm.quotes[mk] = {n: Quote(mk, n, 2.0, 0.5, "t") for n in ("Team Allied", "Team Lynx")}
+    markets = {p.market for p in analysis.analyze(bm, m, 0).picks}
+    assert markets == {"match_winner", "map_3_winner"}
+
+
+def test_closed_market_hidden(tmp_path):
+    conn = db.connect(tmp_path / "bk.sqlite3")
+    t1, t2 = "2026-11-04T20:00:00+00:00", "2026-11-04T20:10:00+00:00"
+    m = {"match_id": "e", "team1": "A", "team2": "B"}
+    row = lambda mk, out, price: {"bookmaker": "oddin", "fixture_id": "e", "market": mk, "outcome": out, "price": price, "phase": "live"}
+    db.upsert_matches(conn, [m], source="oddiwire", updated_at=t1)
+    db.save_feed_rows(conn, [row("match_winner", "A", 2.0), row("map_1_winner", "A", 1.5)], source="oddiwire", taken_at=t1)
+    db.upsert_matches(conn, [m], source="oddiwire", updated_at=t2)
+    db.save_feed_rows(conn, [row("match_winner", "A", 2.0)], source="oddiwire", taken_at=t2)  # карта 1 закрылась
+    board = analysis.load_board(conn, now=datetime(2026, 11, 4, 20, 15, tzinfo=timezone.utc))
+    assert list(board[0].quotes) == ["match_winner"] and board[0].quotes["match_winner"]["A"].price == 2.0
+    # матч, которого нет в последнем снимке, пропадает
+    db.upsert_matches(conn, [{"match_id": "z", "team1": "C", "team2": "D"}], source="oddiwire", updated_at="2026-11-04T20:20:00+00:00")
+    assert [b.fixture_id for b in analysis.load_board(conn, now=datetime(2026, 11, 4, 20, 25, tzinfo=timezone.utc))] == ["z"]
