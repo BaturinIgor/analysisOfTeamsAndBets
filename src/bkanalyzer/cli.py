@@ -104,16 +104,36 @@ def oddspapi_sample(s: Settings, client=None) -> str:
             names[mid] = str(m.get("marketName") or m.get("name") or "")
     except SourceError:
         pass
-    lines = []
-    for fx in fixtures[:2]:
+    import json
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+    upcoming = [fx for fx in fixtures if str(fx.get("startTime") or "") > now[:19]] or fixtures
+    lines = [f"Матчей Dota на 3 дня: {len(fixtures)}, ещё не начались: {len([f for f in fixtures if str(f.get('startTime') or '') > now[:19]])}"]
+    shown = 0
+    for fx in upcoming[:5]:
         fid = str(fx.get("fixtureId") or fx.get("id"))
         lines.append(f"Матч {fid}: {fx.get('participant1Name')} — {fx.get('participant2Name')}, старт {fx.get('startTime')}")
-        rows = flatten_odds(op.odds(fid, found or None))
+        try:
+            payload = op.odds(fid, found or None)
+        except SourceError as exc:
+            lines.append(f"  ошибка: {exc}")
+            continue
+        rows = flatten_odds(payload)
+        if not rows:
+            # Структура ответа не совпала с ожидаемой или коэффициентов нет — печатаем начало ответа как есть
+            keys = list(payload) if isinstance(payload, dict) else type(payload).__name__
+            lines.append(f"  коэффициентов не разобрано; ключи ответа: {keys}")
+            lines.append("  " + json.dumps(payload, ensure_ascii=False)[:1500])
+            continue
         by_market: dict[tuple[str, str], list[str]] = {}
         for r in rows:
             by_market.setdefault((r["bookmaker"], r["market"]), []).append(f"{r['outcome']}={r['price']}")
         for (bm, mid), outs in sorted(by_market.items())[:40]:
             lines.append(f"  {bm:<8} рынок {mid:<8} {names.get(mid, ''):<30} {' '.join(outs)}")
+        shown += 1
+        if shown >= 2:
+            break
     return "\n".join(lines)
 
 

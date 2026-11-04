@@ -142,3 +142,24 @@ def test_oddspapi_sample(client):
     out = oddspapi_sample(settings(), client)
     assert "Матч f1: A — B" in out
     assert "betboom" in out and "рынок 101" in out and "1=1.85" in out
+
+
+def test_oddspapi_sample_prints_raw_when_unparsed():
+    from bkanalyzer.cli import oddspapi_sample
+
+    def handler(request):
+        path = request.url.path
+        if path.endswith("/bookmakers"):
+            return httpx.Response(200, json=[{"slug": "fonbet"}])
+        if path.endswith("/fixtures"):
+            return httpx.Response(200, json=[{"fixtureId": "old", "startTime": "2000-01-01T00:00:00Z"},
+                                             {"fixtureId": "new", "participant1Name": "A", "participant2Name": "B", "startTime": "2999-01-01T00:00:00Z"}])
+        if path.endswith("/odds"):
+            assert request.url.params["fixtureId"] == "new"
+            return httpx.Response(200, json={"weird": {"x": 1}})
+        return httpx.Response(404)
+
+    c = make_client("ua", transport=httpx.MockTransport(handler))
+    out = oddspapi_sample(settings(), c)
+    assert "ещё не начались: 1" in out and "Матч new" in out and "Матч old" not in out
+    assert "ключи ответа: ['weird']" in out
