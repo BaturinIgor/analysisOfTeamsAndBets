@@ -16,6 +16,7 @@ class Settings:
     oddspapi_api_key: str = ""
     oddspapi_base_url: str = "https://api.oddspapi.io/v4"
     oddspapi_winner_market: str = ""
+    oddiwire_api_key: str = ""
     telegram_bot_token: str = ""
     telegram_allowed_ids: tuple[int, ...] = field(default_factory=tuple)
     contact: str = "github.com/BaturinIgor/analysisOfTeamsAndBets"
@@ -40,6 +41,7 @@ def load_settings(env_file: str | os.PathLike | None = ".env") -> Settings:
         oddspapi_api_key=g("ODDSPAPI_API_KEY", ""),
         oddspapi_base_url=g("ODDSPAPI_BASE_URL", "https://api.oddspapi.io/v4").rstrip("/"),
         oddspapi_winner_market=g("ODDSPAPI_WINNER_MARKET", ""),
+        oddiwire_api_key=g("ODDIWIRE_API_KEY", ""),
         telegram_bot_token=g("TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_ids=_ids(g("TELEGRAM_ALLOWED_IDS", "")),
         contact=g("CONTACT", "github.com/BaturinIgor/analysisOfTeamsAndBets"),

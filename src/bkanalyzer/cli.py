@@ -12,6 +12,7 @@ from . import db
 from .config import Settings, load_settings
 from .http import SourceError, make_client
 from .sources.liquipedia import Liquipedia
+from .sources.oddiwire import OddiWire, find_dota_sport
 from .sources.oddspapi import OddsPapi, find_bookmakers, flatten_odds
 from .sources.opendota import OpenDota
 from .sources.stratz import Stratz
@@ -134,6 +135,58 @@ def oddspapi_sample(s: Settings, client=None) -> str:
         shown += 1
         if shown >= 2:
             break
+    return "\n".join(lines)
+
+
+def _sport_arg(tools: list[dict], tool: str) -> str | None:
+    """Имя параметра «вид спорта» у инструмента OddiWire по его inputSchema."""
+    for t in tools:
+        if t.get("name") == tool:
+            for prop in (t.get("inputSchema") or {}).get("properties", {}):
+                if "sport" in prop.lower():
+                    return prop
+    return None
+
+
+def oddiwire_sample(s: Settings, client=None, out: Path | None = Path("data/oddiwire_sample.json")) -> str:
+    """Разведка OddiWire: инструменты, тариф, виды спорта и линия Dota до матча.
+
+    Полный ответ сохраняется в data/oddiwire_sample.json — его и нужно прислать.
+    """
+    import json
+
+    ow = OddiWire(client or make_client(s.user_agent), s.oddiwire_api_key)
+    dump: dict = {}
+    lines: list[str] = []
+    try:
+        tools = ow.tools()
+        dump["tools"] = tools
+        lines.append("Инструменты: " + ", ".join(t.get("name", "?") for t in tools))
+        for name, args in (("get_my_plan", {}), ("list_sports", {})):
+            try:
+                dump[name] = ow.call(name, args)
+            except SourceError as exc:
+                dump[name] = f"ошибка: {exc}"
+        sport = find_dota_sport(dump.get("list_sports"))
+        lines.append(f"Dota 2 в list_sports: {sport or 'не найдена'}")
+        if sport:
+            for name in ("get_coverage", "get_prematch_odds"):
+                arg = _sport_arg(tools, name)
+                try:
+                    dump[name] = ow.call(name, {arg: sport} if arg else {})
+                except SourceError as exc:
+                    dump[name] = f"ошибка: {exc}"
+    except SourceError as exc:
+        lines.append(f"[FAIL] {exc}")
+    for key, val in dump.items():
+        if key == "tools":
+            continue
+        text = val if isinstance(val, str) else json.dumps(val, ensure_ascii=False)
+        lines.append(f"--- {key} ({len(text)} символов) ---\n{text[:1500]}")
+    if out is not None and dump:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(dump, ensure_ascii=False, indent=2), encoding="utf-8")
+        lines.append(f"Полный ответ: {out} — пришлите этот файл в тред.")
     return "\n".join(lines)
 
 
@@ -298,6 +351,8 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("oddspapi-sample", help="показать рынки OddsPapi на одном матче Dota (чтобы найти рынок «победа в матче»)")
 
+    sub.add_parser("oddiwire-sample", help="проверить OddiWire (линия Oddin, как у BetBoom): инструменты и линия Dota")
+
     p_sm = sub.add_parser("sync-matches", help="загрузить историю про-карт из OpenDota")
     p_sm.add_argument("--days", type=int, default=730)
 
@@ -344,6 +399,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "oddspapi-sample":
         print(oddspapi_sample(s))
+        return 0
+
+    if args.cmd == "oddiwire-sample":
+        print(oddiwire_sample(s))
         return 0
 
     if args.cmd == "sync-matches":
