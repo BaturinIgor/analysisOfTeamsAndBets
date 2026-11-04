@@ -87,6 +87,32 @@ def collect_odds_once(s: Settings, conn, client=None) -> int:
     return saved
 
 
+def inspect_run(run_dir: Path) -> str:
+    """Сводка по папке разведки: сколько кадров в каждую сторону и какие строки в них видны."""
+    import json
+
+    from .bookmakers.protowire import WireError, decode, strings
+
+    index = json.loads((run_dir / "index.json").read_text(encoding="utf-8"))
+    by_url: dict[tuple[str, str], int] = {}
+    seen: list[str] = []
+    for item in index:
+        key = (item["url"].split("?")[0], item["dir"])
+        by_url[key] = by_url.get(key, 0) + 1
+        path = run_dir / item["file"]
+        if path.suffix == ".bin":
+            try:
+                for s in strings(decode(path.read_bytes())):
+                    if len(s) > 2 and not s.startswith("http") and s not in seen:
+                        seen.append(s)
+            except WireError:
+                pass
+    lines = [f"Записей: {len(index)}"]
+    lines += [f"  {d:>3} {n:>5}  {u}" for (u, d), n in sorted(by_url.items())]
+    lines.append("Строки из кадров (первые 40): " + "; ".join(seen[:40]))
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="bk", description="Анализатор ставок Dota 2 — этап 0")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -94,8 +120,11 @@ def main(argv: list[str] | None = None) -> int:
 
     p_bb = sub.add_parser("betboom-discover", help="записать JSON-запросы публичной линии BetBoom")
     p_bb.add_argument("--url", default=None)
-    p_bb.add_argument("--seconds", type=int, default=90)
+    p_bb.add_argument("--seconds", type=int, default=120)
     p_bb.add_argument("--headless", action="store_true")
+
+    p_bi = sub.add_parser("betboom-inspect", help="кратко показать, что записала разведка BetBoom")
+    p_bi.add_argument("run_dir", type=Path)
 
     p_co = sub.add_parser("collect-odds", help="сохранять снимки коэффициентов OddsPapi в SQLite")
     p_co.add_argument("--interval", type=int, default=600, help="секунд между снимками")
@@ -111,7 +140,11 @@ def main(argv: list[str] | None = None) -> int:
         from .bookmakers import betboom
 
         run_dir = betboom.discover(args.url or betboom.DEFAULT_URL, seconds=args.seconds, headless=args.headless)
-        print(f"Готово. Ответы сохранены в {run_dir}. Заархивируйте папку и пришлите её в тред.")
+        print(f"Готово. Ответы сохранены в {run_dir}. Проверьте: bk betboom-inspect {run_dir} — затем заархивируйте папку и пришлите в тред.")
+        return 0
+
+    if args.cmd == "betboom-inspect":
+        print(inspect_run(args.run_dir))
         return 0
 
     if args.cmd == "collect-odds":
