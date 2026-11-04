@@ -98,13 +98,20 @@ def load_board(conn: sqlite3.Connection, since_hours: float = 6, now: datetime |
     now = now or datetime.now(timezone.utc)
     cutoff = datetime.fromtimestamp(now.timestamp() - since_hours * 3600, timezone.utc).isoformat(timespec="seconds")
     conn.row_factory = None
+    latest = conn.execute("SELECT MAX(updated_at) FROM bookmaker_matches WHERE source='oddiwire'").fetchone()[0]
+    if not latest or latest < cutoff:
+        return []
+    # только матчи из последнего снимка: закончившиеся пропадают из ленты
     matches = conn.execute(
-        """SELECT match_id, team1, team2, start_time, tournament_id, score FROM bookmaker_matches
-           WHERE source='oddiwire' AND updated_at >= ? ORDER BY start_time""",
-        (cutoff,),
+        """SELECT match_id, team1, team2, start_time, tournament_id, score, updated_at FROM bookmaker_matches
+           WHERE source='oddiwire' AND updated_at = ? ORDER BY start_time""",
+        (latest,),
     ).fetchall()
     out = []
-    for mid, t1, t2, start, tour, score in matches:
+    for mid, t1, t2, start, tour, score, seen in matches:
+        open_markets = {m for (m,) in conn.execute(
+            "SELECT market FROM feed_markets WHERE source='oddiwire' AND fixture_id=? AND last_seen=?", (mid, seen))}
+        tracked = conn.execute("SELECT 1 FROM feed_markets WHERE source='oddiwire' AND fixture_id=? LIMIT 1", (mid,)).fetchone()
         rows = conn.execute(
             """SELECT market, outcome, price, fair_prob, taken_at, phase FROM odds_snapshots
                WHERE source='oddiwire' AND fixture_id=? ORDER BY id""",
@@ -116,7 +123,10 @@ def load_board(conn: sqlite3.Connection, since_hours: float = 6, now: datetime |
             bm.quotes.setdefault(market, {})[outcome] = Quote(market, outcome, price, fair, taken)
             if taken >= last_time:
                 last_time, bm.phase = taken, phase or bm.phase
-        # рынок мог закрыться: оставляем только цены из последнего снимка этого рынка
+        # закрытые рынки (их не было в последнем снимке) не показываем
+        if tracked:
+            bm.quotes = {m: q for m, q in bm.quotes.items() if m in open_markets}
+        # внутри рынка — только цены из его последнего изменения
         for market, outs in bm.quotes.items():
             newest = max(q.taken_at for q in outs.values())
             bm.quotes[market] = {k: q for k, q in outs.items() if q.taken_at == newest}
@@ -156,7 +166,9 @@ def analyze(bm: BoardMatch, model: rating.EloModel, now: int | None = None) -> A
     won, lost = bm.maps_score
     res.p_map = p
     res.p_series = series_from_score(p, bm.best_of, won, lost)
-    for market, prob in (("match_winner", res.p_series), (f"map_{won + lost + 1}_winner", p)):
+    # в эфире текущая карта уже идёт — рейтинг не знает, что на ней происходит; берём следующую
+    next_map = won + lost + (2 if bm.phase == "live" else 1)
+    for market, prob in (("match_winner", res.p_series), (f"map_{next_map}_winner", p)):
         for team, team_prob in ((bm.team1, prob), (bm.team2, 1 - prob)):
             q = bm.price(market, team)
             if q:
@@ -169,9 +181,15 @@ class Thresholds:
     min_ev: float = 0.05
     min_prob: float = 0.0
     min_odds: float = 1.0
+    max_gap: float = 0.15  # насколько наша вероятность может расходиться с рынком (без маржи)
+
+    def suspicious(self, pick: Pick) -> bool:
+        """Модель слишком далеко от рынка: скорее ошибка модели, чем ошибка букмекера."""
+        return pick.book_prob is not None and abs(pick.prob - pick.book_prob) > self.max_gap
 
     def ok(self, pick: Pick) -> bool:
-        return pick.ev >= self.min_ev and pick.prob >= self.min_prob and pick.price >= self.min_odds
+        return (pick.ev >= self.min_ev and pick.prob >= self.min_prob and pick.price >= self.min_odds
+                and not self.suspicious(pick))
 
 
 def market_label(market: str) -> str:

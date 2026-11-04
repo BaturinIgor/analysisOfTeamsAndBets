@@ -94,3 +94,22 @@ def test_simulate_step_notifies(conn, monkeypatch):
     sent = []
     simulate_step(Settings(sim_bank=1000, sim_stake=50), conn, ModelCache(), notify=sent.append, log=lambda *_: None)
     assert len(sent) == 1 and sent[0].startswith("📝 Бумажная ставка (до матча): Spirit — Tundra")
+
+
+def test_no_bet_when_result_known(conn):
+    start = int(datetime(2026, 11, 4, 22, 0, tzinfo=timezone.utc).timestamp())
+    add_series(conn, start, ["Team Spirit", "Team Spirit"])  # серия уже сыграна
+    assert sim.place_bets(conn, analyses(conn), Thresholds(0.05), CFG, now=NOW) == []
+
+
+def test_sim_reset(tmp_path, monkeypatch):
+    from bkanalyzer.cli import main
+
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "x.sqlite3"))
+    c = db.connect(tmp_path / "x.sqlite3")
+    sim.ensure_schema(c)
+    c.execute("INSERT INTO paper_bets (created_at, mode, fixture_id, market, pick, price, prob, stake, bank_before, strategy) VALUES ('t','live','f','m','p',2,0.5,1,1,'fixed')")
+    c.commit()
+    assert main(["sim-reset"]) == 1
+    assert main(["sim-reset", "--yes"]) == 0
+    assert c.execute("SELECT COUNT(*) FROM paper_bets").fetchone()[0] == 0
