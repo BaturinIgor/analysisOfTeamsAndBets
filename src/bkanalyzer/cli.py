@@ -87,6 +87,36 @@ def collect_odds_once(s: Settings, conn, client=None) -> int:
     return saved
 
 
+def oddspapi_sample(s: Settings, client=None) -> str:
+    """Рынки и исходы одного ближайшего матча Dota в OddsPapi — по ним настраиваем ODDSPAPI_WINNER_MARKET."""
+    client = client or make_client(s.user_agent)
+    op = OddsPapi(client, s.oddspapi_api_key, s.oddspapi_base_url)
+    found = [v.get("slug") for v in find_bookmakers(op.bookmakers()).values() if v and v.get("slug")]
+    today = date.today()
+    fixtures = op.fixtures(today.isoformat(), (today + timedelta(days=3)).isoformat())
+    if not fixtures:
+        return "Матчей Dota на ближайшие 3 дня в OddsPapi нет"
+    names: dict[str, str] = {}
+    try:
+        markets = op.markets()
+        for m in markets if isinstance(markets, list) else []:
+            mid = str(m.get("marketId") or m.get("id") or "")
+            names[mid] = str(m.get("marketName") or m.get("name") or "")
+    except SourceError:
+        pass
+    lines = []
+    for fx in fixtures[:2]:
+        fid = str(fx.get("fixtureId") or fx.get("id"))
+        lines.append(f"Матч {fid}: {fx.get('participant1Name')} — {fx.get('participant2Name')}, старт {fx.get('startTime')}")
+        rows = flatten_odds(op.odds(fid, found or None))
+        by_market: dict[tuple[str, str], list[str]] = {}
+        for r in rows:
+            by_market.setdefault((r["bookmaker"], r["market"]), []).append(f"{r['outcome']}={r['price']}")
+        for (bm, mid), outs in sorted(by_market.items())[:40]:
+            lines.append(f"  {bm:<8} рынок {mid:<8} {names.get(mid, ''):<30} {' '.join(outs)}")
+    return "\n".join(lines)
+
+
 def inspect_run(run_dir: Path) -> str:
     """Сводка по папке разведки: сколько кадров в каждую сторону и какие строки в них видны."""
     import json
@@ -181,7 +211,7 @@ def _latest_betboom_prices(conn, t1: str, t2: str) -> dict | None:
     return {"t1": prices["П2"] if swapped else prices["П1"], "t2": prices["П1"] if swapped else prices["П2"]}
 
 
-def predict_report(conn, team1: str, team2: str, best_of: int = 3) -> str:
+def predict_report(conn, team1: str, team2: str, best_of: int = 3, winner_market: str | None = None) -> str:
     from . import rating
 
     (model, _), total = _fitted(conn)
@@ -206,12 +236,18 @@ def predict_report(conn, team1: str, team2: str, best_of: int = 3) -> str:
     names = {"win": sa.name, "lose": sb.name, "draw": "ничья"}
     for k, v in probs.items():
         lines.append(f"  {names[k]}: {v:.1%} (честный коэффициент {1 / v:.2f})" if v > 0 else f"  {names[k]}: 0%")
+    quotes = []
     bb = _latest_betboom_prices(conn, sa.name, sb.name)
     if bb and (bb["t1"] or bb["t2"]):
-        lines.append("  BetBoom, последний коэффициент на матч:")
-        for name, price, prob in ((sa.name, bb["t1"], probs["win"]), (sb.name, bb["t2"], probs["lose"])):
-            if price:
-                lines.append(f"    {name}: {price:.2f}, перевес (EV) {prob * price - 1:+.1%}")
+        quotes.append(("betboom", bb["t1"], bb["t2"]))
+    quotes += db.latest_winner_odds(conn, sa.name, sb.name, winner_market or "")
+    if quotes:
+        lines.append("  Последние коэффициенты на матч и перевес (EV) нашей оценки:")
+        for bookmaker, p1, p2 in quotes:
+            parts = [f"{name} {price:.2f} ({prob * price - 1:+.1%})" for name, price, prob in ((sa.name, p1, probs["win"]), (sb.name, p2, probs["lose"])) if price]
+            lines.append(f"    {bookmaker}: " + ", ".join(parts))
+    else:
+        lines.append("  Коэффициентов по этому матчу в базе нет: bk collect-odds или bk odds-add")
     lines.append("  Только рейтинг по результатам карт; форма, патч, состав и драфт пока не учитываются.")
     return "\n".join(lines)
 
@@ -233,10 +269,14 @@ def main(argv: list[str] | None = None) -> int:
     p_bp.add_argument("run_dir", type=Path)
     p_bp.add_argument("--save", action="store_true", help="сохранить коэффициенты в базу")
 
-    p_bc = sub.add_parser("betboom-collect", help="держать линию BetBoom открытой и писать изменения коэффициентов в базу")
-    p_bc.add_argument("--url", default=None)
-    p_bc.add_argument("--minutes", type=int, default=0, help="0 — пока не остановите Ctrl+C")
-    p_bc.add_argument("--headless", action="store_true")
+    p_oa = sub.add_parser("odds-add", help="вручную записать коэффициенты на победу в матче (например, BetBoom)")
+    p_oa.add_argument("team1")
+    p_oa.add_argument("team2")
+    p_oa.add_argument("--p1", type=float, required=True, help="коэффициент на победу team1")
+    p_oa.add_argument("--p2", type=float, required=True, help="коэффициент на победу team2")
+    p_oa.add_argument("--bookmaker", default="betboom")
+
+    sub.add_parser("oddspapi-sample", help="показать рынки OddsPapi на одном матче Dota (чтобы найти рынок «победа в матче»)")
 
     p_sm = sub.add_parser("sync-matches", help="загрузить историю про-карт из OpenDota")
     p_sm.add_argument("--days", type=int, default=730)
@@ -276,11 +316,14 @@ def main(argv: list[str] | None = None) -> int:
         print(parse_run(args.run_dir, conn))
         return 0
 
-    if args.cmd == "betboom-collect":
-        from .bookmakers import betboom
-
+    if args.cmd == "odds-add":
         conn = db.connect(Path(s.db_path))
-        betboom.collect(conn, args.url or betboom.DOTA_URL, minutes=args.minutes, headless=args.headless)
+        db.add_manual_winner_odds(conn, args.bookmaker, args.team1, args.team2, args.p1, args.p2)
+        print(f"Записано: {args.bookmaker} {args.team1} {args.p1} — {args.team2} {args.p2}")
+        return 0
+
+    if args.cmd == "oddspapi-sample":
+        print(oddspapi_sample(s))
         return 0
 
     if args.cmd == "sync-matches":
@@ -297,7 +340,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "predict":
-        print(predict_report(db.connect(Path(s.db_path)), args.team1, args.team2, args.bo))
+        print(predict_report(db.connect(Path(s.db_path)), args.team1, args.team2, args.bo, s.oddspapi_winner_market))
         return 0
 
     if args.cmd == "collect-odds":

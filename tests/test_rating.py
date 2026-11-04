@@ -106,5 +106,14 @@ def test_reports(tmp_path):
     assert "Калибровка" in report and "Топ-20" in report
     out = predict_report(conn, "T1", "T2", 3)
     assert "Bo3" in out and "честный коэффициент" in out
-    assert "T1: 2.60" in out and "T2: 1.50" in out  # стороны BetBoom переставлены правильно
+    assert "betboom: T1 2.60" in out and "T2 1.50" in out  # стороны BetBoom переставлены правильно
+    db.add_manual_winner_odds(conn, "betboom", "T2", "T1", 1.45, 2.75)
+    conn.executemany(
+        "INSERT INTO odds_snapshots (taken_at, source, bookmaker, fixture_id, participant1, participant2, market, outcome, price) VALUES ('t','oddspapi','fonbet','f1','T1','T2',?,?,?)",
+        [("101", "1", 2.5), ("101", "2", 1.52), ("999", "1", 9.0)],
+    )
+    out = predict_report(conn, "T1", "T2", 3, winner_market="101")
+    assert "betboom (вручную): T1 2.75" in out
+    assert "fonbet: T1 2.50" in out and "9.00" not in out
+    assert "нет: bk collect-odds" in predict_report(conn, "T3", "T4", 3)
     assert "не найдена" in predict_report(conn, "Nope", "T2")

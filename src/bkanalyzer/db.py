@@ -109,3 +109,45 @@ def save_price_changes(conn: sqlite3.Connection, rows: list[dict], *, source: st
     )
     conn.commit()
     return len(new)
+
+
+WINNER_MARKET = "Исход матча | Матч"
+
+
+def add_manual_winner_odds(conn: sqlite3.Connection, bookmaker: str, team1: str, team2: str, p1: float, p2: float, taken_at: str | None = None) -> None:
+    """Ручной ввод коэффициентов на победу в матче (например, с сайта BetBoom перед ставкой)."""
+    taken_at = taken_at or _now()
+    fixture = f"manual:{team1.casefold()}|{team2.casefold()}"
+    conn.executemany(
+        """INSERT INTO odds_snapshots (taken_at, source, bookmaker, fixture_id, participant1, participant2, market, outcome, price)
+           VALUES (?, 'manual', ?, ?, ?, ?, ?, ?, ?)""",
+        [(taken_at, bookmaker, fixture, team1, team2, WINNER_MARKET, side, price) for side, price in (("П1", p1), ("П2", p2))],
+    )
+    conn.commit()
+
+
+def latest_winner_odds(conn: sqlite3.Connection, team1: str, team2: str, oddspapi_market: str = "") -> list[tuple[str, float | None, float | None]]:
+    """Последние коэффициенты на победу (bookmaker, за team1, за team2) из ручного ввода и OddsPapi.
+
+    В OddsPapi исход "1" — participant1, "2" — participant2; рынок задаётся ODDSPAPI_WINNER_MARKET.
+    """
+    out = []
+    rows = conn.execute(
+        """SELECT source, bookmaker, fixture_id, participant1, market, outcome, price FROM odds_snapshots
+           WHERE ((lower(participant1)=lower(?) AND lower(participant2)=lower(?)) OR (lower(participant1)=lower(?) AND lower(participant2)=lower(?)))
+             AND ((source='manual' AND market=?) OR (source='oddspapi' AND market=?))
+           ORDER BY id""",
+        (team1, team2, team2, team1, WINNER_MARKET, oddspapi_market or "\x00"),
+    ).fetchall()
+    latest: dict[tuple[str, str], dict] = {}
+    for source, bookmaker, fixture, part1, market, outcome, price in rows:
+        side = {"П1": 1, "1": 1, "П2": 2, "2": 2}.get(outcome)
+        if side is None:
+            continue
+        swapped = part1.casefold() != team1.casefold()
+        team_side = (3 - side) if swapped else side
+        latest.setdefault((source, bookmaker), {})[team_side] = price
+    for (source, bookmaker), prices in latest.items():
+        label = f"{bookmaker} (вручную)" if source == "manual" else bookmaker
+        out.append((label, prices.get(1), prices.get(2)))
+    return out

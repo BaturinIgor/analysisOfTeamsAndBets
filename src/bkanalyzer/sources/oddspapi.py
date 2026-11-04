@@ -32,6 +32,10 @@ class OddsPapi:
     def bookmakers(self) -> list[dict]:
         return self._get("/bookmakers")
 
+    def markets(self) -> list[dict]:
+        """Справочник рынков (id → название), если OddsPapi его отдаёт."""
+        return self._get("/markets", sportId=DOTA2_SPORT_ID)
+
     def fixtures(self, date_from: str, date_to: str, sport_id: int = DOTA2_SPORT_ID) -> list[dict]:
         """Матчи в интервале дат (не больше 10 дней), формат YYYY-MM-DD."""
         return self._get("/fixtures", sportId=sport_id, **{"from": date_from, "to": date_to})
