@@ -46,6 +46,9 @@ def test_place_once_per_match_and_mode(conn):
     assert [(b["pick"], b["mode"], b["market"]) for b in placed] == [("Spirit", "prematch", "match_winner")]
     assert sim.place_bets(conn, analyses(conn), Thresholds(0.05), CFG, now=NOW) == []
     assert sim.bank(conn, "prematch", CFG) == 950
+    s = sim.summary(conn, CFG, "prematch")
+    assert (s["bank"], s["in_play"], s["free"]) == (1000, 50, 950)
+    assert "банк 1000 (в игре 50, свободно 950)" in sim.report(conn, CFG)
 
 
 def test_settle_match_and_clv(conn):

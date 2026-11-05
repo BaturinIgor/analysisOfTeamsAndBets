@@ -328,7 +328,10 @@ def summary(conn: sqlite3.Connection, cfg: SimSettings, mode: str) -> dict:
         "mode": mode, "strategy": cfg.strategy, "bets": len(rows), "open": sum(r["status"] == "open" for r in rows),
         "won": sum(r["status"] == "won" for r in rows), "lost": sum(r["status"] == "lost" for r in rows),
         "void": sum(r["status"] == "void" for r in rows), "staked": staked, "profit": profit,
-        "roi": profit / staked if staked else None, "bank": bank(conn, mode, cfg) + sum(r["stake"] for r in rows if r["status"] == "open"),
+        "roi": profit / staked if staked else None,
+        # bank — весь банк (свободные деньги + стоящие на открытых ставках); free — можно ставить сейчас
+        "bank": bank(conn, mode, cfg) + sum(r["stake"] for r in rows if r["status"] == "open"),
+        "in_play": sum(r["stake"] for r in rows if r["status"] == "open"), "free": bank(conn, mode, cfg),
         "max_dd": max_dd, "worst_streak": worst, "clv": sum(clv) / len(clv) if clv else None, "rows": rows,
     }
 
@@ -369,11 +372,15 @@ def report(conn: sqlite3.Connection, cfg: SimSettings) -> str:
             continue
         lines.append(f"\n{_cap(MODE_LABEL[mode])}: ставок {main['bets']} (открыто {main['open']}, ✅ {main['won']}, ❌ {main['lost']}, ↩️ {main['void']})")
         total += main["won"] + main["lost"]
-        if main["won"] + main["lost"]:
-            for s in sums:
-                label = STRATEGY_LABEL.get(s["strategy"], s["strategy"]) + ": " if len(sums) > 1 else ""
-                lines.append(f"  {label}банк {s['bank']:.0f}, прибыль {s['profit']:+.0f}, ROI {s['roi']:+.1%}, "
+        for s in sums if main["bets"] else []:
+            label = STRATEGY_LABEL.get(s["strategy"], s["strategy"]) + ": " if len(sums) > 1 else ""
+            play = f" (в игре {s['in_play']:.0f}, свободно {s['free']:.0f})" if s["in_play"] else ""
+            if s["won"] + s["lost"]:
+                lines.append(f"  {label}банк {s['bank']:.0f}{play}, прибыль {s['profit']:+.0f}, ROI {s['roi']:+.1%}, "
                              f"просадка {s['max_dd']:.1%}, худшая серия {s['worst_streak']}")
+            else:
+                lines.append(f"  {label}банк {s['bank']:.0f}{play}")
+        if main["won"] + main["lost"]:
             if main["clv"] is not None:
                 lines.append(f"  средний CLV {main['clv']:+.1%} (положительный — берём коэффициент лучше закрытия)")
         for r in main["rows"][-5:]:
