@@ -153,6 +153,9 @@ def simulate_step(s: Settings, conn, models, od=None, last_sync: list | None = N
             from . import details
 
             details.sync_patches(conn, od)
+            from . import news
+
+            news.sync_pro_players(conn, od)
             details.sync_players(conn, od, max_batches=3, log=lambda *_: None)
             last_sync[0] = time.monotonic()
             if added:
@@ -221,7 +224,7 @@ def draft_step(s: Settings, conn, models, od, ow, seen: set, notify=None, log=pr
             continue
         bet = sim.place_pick(conn, draft.as_analysis(bm, picks), best, "draft", s.sim())
         if notify:
-            notify(draft.message(bm, p, best, bet is not None))
+            notify(draft.message(bm, p, best, bet is not None) + draft.roster_note(conn, model, bm, d, team1_radiant, now))
         if bet:
             placed.append(bet)
     return placed
@@ -297,7 +300,7 @@ def run_bot(s: Settings, collect: bool = True, interval: int = 600) -> int:
 
         threading.Thread(target=collector, daemon=True).start()
     bot = Bot(db.connect(Path(s.db_path)), s.telegram_allowed_ids, s.thresholds(), s.timezone, sim=s.sim(),
-              export_dir=Path(s.db_path).parent / "exports")
+              export_dir=Path(s.db_path).parent / "exports", news_client=make_client(s.user_agent))
     status = check_telegram(s.telegram_bot_token, tg)
     print(f"Telegram{' через прокси' if s.telegram_proxy else ''}: {status}")
     print("Бот запущен. Напишите ему /today в Telegram. Остановить: Ctrl+C")
@@ -662,6 +665,9 @@ def main(argv: list[str] | None = None) -> int:
             from . import details
 
             print(f"Патчей: {details.sync_patches(conn, od)}")
+            from . import news
+
+            print(f"Про-игроков: {news.sync_pro_players(conn, od)}")
             print("Составы Tier 1–2 (пакетами по 400 карт):")
             print(f"Карт с составом добавлено: {details.sync_players(conn, od)}")
         return 0

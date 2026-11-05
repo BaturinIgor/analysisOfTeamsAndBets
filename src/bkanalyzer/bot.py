@@ -29,6 +29,7 @@ HELP = """Анализатор ставок Dota 2
 /match N — подробный разбор матча N из /today
 /value — сигналы: перевес (EV) не меньше порога
 /team название — рейтинг команды
+/news N — состав и новости за 7 дней по матчу N (или /news команда)
 /model — насколько точна модель на последних 180 днях
 /sim — бумажные ставки: банк, ROI, CLV
 /settings — текущие пороги
@@ -108,7 +109,7 @@ def _team(name: str, st) -> str:
 class Bot:
     def __init__(self, conn: sqlite3.Connection, allowed_ids: tuple[int, ...], thresholds: Thresholds | None = None,
                  tz: str = "Europe/Moscow", now=None, sim: simmod.SimSettings | None = None,
-                 export_dir: Path = Path("data/exports")):
+                 export_dir: Path = Path("data/exports"), news_client: httpx.Client | None = None):
         self.sim = sim or simmod.SimSettings()
         self.conn = conn
         self.allowed = set(allowed_ids)
@@ -116,6 +117,7 @@ class Bot:
         self.tz = ZoneInfo(tz)
         self.tz_name = tz
         self.export_dir = Path(export_dir)
+        self.news_client = news_client  # None — новости только из кэша (в тестах)
         self.models = ModelCache()
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._last_list: list[str] = []  # fixture_id по номерам из /today
@@ -155,10 +157,7 @@ class Bot:
         lines.append("\nПодробно: /match N")
         return "\n".join(lines)
 
-    def match(self, arg: str) -> str:
-        items, _ = self._analyses()
-        if not items:
-            return "В линии нет матчей Dota."
+    def _find(self, items: list[Analysis], arg: str) -> Analysis | None:
         target = None
         if arg.isdigit() and self._last_list and 1 <= int(arg) <= len(self._last_list):
             fid = self._last_list[int(arg) - 1]
@@ -169,6 +168,52 @@ class Bot:
             q = analysis.normalize_raw(arg)
             target = next((a for a in items if q and any(q in f(t) for t in (a.match.team1, a.match.team2)
                                                          for f in (analysis.normalize_raw, analysis.normalize))), None)
+        return target
+
+    def risks(self, m, now: int, fetch: bool = True) -> list[str]:
+        """Состав по нашим данным и новости с флагами риска для обеих команд."""
+        from . import news
+
+        model, _ = self.models.get(self.conn)
+        lines = []
+        for team in (m.team1, m.team2):
+            found = analysis.match_team(model, team)
+            r = news.roster_risk(self.conn, found[0], now) if found else None
+            if r:
+                lines.append("⚠️ " + r.text(team))
+        for team in (m.team1, m.team2):
+            items = news.team_news(self.conn, self.news_client if fetch else None, team, now)
+            risky = [it for it in items if it.risks]
+            if risky:
+                it = risky[0]
+                lines.append(f"⚠️ {team}, новости ({', '.join(it.risks)}): {it.title}\n    {it.link}")
+        return lines
+
+    def news(self, arg: str) -> str:
+        from . import news
+
+        if not arg:
+            return "Напишите: /news N (номер матча из /today) или /news название команды"
+        now = int(self._now().timestamp())
+        items, _ = self._analyses()
+        target = self._find(items, arg) if items else None
+        teams = [target.match.team1, target.match.team2] if target else [arg]
+        lines = []
+        model, _ = self.models.get(self.conn)
+        for team in teams:
+            found = analysis.match_team(model, team)
+            r = news.roster_risk(self.conn, found[0], now) if found else None
+            if r:
+                lines.append("⚠️ " + r.text(team))
+            lines += news.news_block(team, news.team_news(self.conn, self.news_client, team, now))
+            lines.append("")
+        return "\n".join(lines).strip()
+
+    def match(self, arg: str) -> str:
+        items, _ = self._analyses()
+        if not items:
+            return "В линии нет матчей Dota."
+        target = self._find(items, arg)
         if target is None:
             return "Не нашёл матч. Посмотрите номера в /today"
         a, m = target, target.match
@@ -203,7 +248,10 @@ class Bot:
                 lines.append(f"⚠️ — модель расходится с рынком больше чем на {self.thresholds.max_gap:.0%}: скорее ошибается модель, ставки нет.")
             if not any(self.thresholds.ok(p) for p in a.picks):
                 lines.append("Ставки нет: перевес ниже порога.")
-        lines.append("\nРиски: модель видит результаты карт, форму, личные встречи, патч и стабильность состава; героев до драфта не знает (после драфта бот пересчитает карту сам и пришлёт сигнал, если он есть).")
+        risk = self.risks(m, int(self._now().timestamp()))
+        lines.append("\nРиски:" + ("\n" + "\n".join(risk) if risk else " по составу и новостям за 7 дней ничего не нашёл."))
+        lines.append("Модель не знает героев до драфта (после драфта бот пересчитает карту сам и пришлёт сигнал, если он есть). "
+                     "Подробнее о новостях: /news " + m.team1)
         return "\n".join(lines)
 
     def value(self) -> str:
@@ -297,6 +345,8 @@ class Bot:
                 return self.match(arg) if arg else "Напишите: /match N (номер из /today)"
             if cmd == "/value":
                 return self.value()
+            if cmd == "/news":
+                return self.news(arg)
             if cmd == "/team":
                 return self.team(arg)
             if cmd == "/model":
@@ -328,6 +378,7 @@ COMMANDS = [
     ("match", "разбор матча: /match N"),
     ("value", "сигналы с перевесом"),
     ("team", "рейтинг команды"),
+    ("news", "состав и новости: /news N"),
     ("model", "точность модели"),
     ("sim", "симулятор бумажных ставок"),
     ("settings", "пороги сигнала"),
