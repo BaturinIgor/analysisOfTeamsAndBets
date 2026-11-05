@@ -19,6 +19,7 @@ from . import analysis, rating, sim as simmod
 from .analysis import Analysis, Thresholds, market_label
 
 API = "https://api.telegram.org"
+NOISY_FAILS = 3  # с какого обрыва подряд писать в лог
 MAX_LEN = 4000
 
 HELP = """Анализатор ставок Dota 2
@@ -411,18 +412,20 @@ def run_polling(token: str, bot: Bot, client: httpx.Client | None = None, log=pr
     fails = 0
     while not stop():
         try:
-            resp = client.get(f"{base}/getUpdates", params={"timeout": 50, "offset": offset})
+            # короткий long poll: VPN и провайдеры рвут долгие простаивающие соединения
+            resp = client.get(f"{base}/getUpdates", params={"timeout": 25, "offset": offset})
             data = resp.json()
         except (httpx.HTTPError, ValueError) as exc:
             fails += 1
-            if fails == 1 or fails % 20 == 0:
+            # одиночные обрывы — норма через VPN: молча переподключаемся, пишем только о затяжных
+            if fails == NOISY_FAILS or (fails > NOISY_FAILS and fails % 20 == 0):
                 log(f"Telegram недоступен ({fails} раз подряд): {exc}. "
                     "Если так постоянно — включите VPN или задайте TELEGRAM_PROXY в .env")
-            sleep(min(60, 5 * fails))
+            sleep(1 if fails < NOISY_FAILS else min(60, 5 * fails))
             continue
-        if fails:
+        if fails >= NOISY_FAILS:
             log("Связь с Telegram восстановлена")
-            fails = 0
+        fails = 0
         if outbox is not None and outbox.pending:
             n = outbox.flush()
             if n:

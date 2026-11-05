@@ -140,7 +140,7 @@ def test_polling_backoff_and_check(bot):
     def handler(req):
         if req.url.path.endswith("/getUpdates"):
             calls["n"] += 1
-            if calls["n"] <= 2:
+            if calls["n"] <= 3:
                 raise httpx.ConnectError("Connection reset by peer")
             return httpx.Response(200, json={"ok": True, "result": []})
         if req.url.path.endswith("/getMe"):
@@ -148,8 +148,8 @@ def test_polling_backoff_and_check(bot):
         return httpx.Response(200, json={"ok": True})
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    run_polling("T", bot, client, log=logs.append, stop=lambda: calls["n"] >= 3, sleep=sleeps.append)
-    assert sleeps == [5, 10]
+    run_polling("T", bot, client, log=logs.append, stop=lambda: calls["n"] >= 4, sleep=sleeps.append)
+    assert sleeps == [1, 1, 15]  # первые обрывы — быстрый повтор без записи в лог
     assert len([l for l in logs if "недоступен" in l]) == 1 and "TELEGRAM_PROXY" in logs[0]
     assert logs[-1] == "Связь с Telegram восстановлена"
     assert check_telegram("T", client) == "ok, бот @bk_bot"
