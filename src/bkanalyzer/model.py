@@ -6,25 +6,27 @@
 - form30   — разница винрейта за 30 дней;
 - h2h      — доля побед в личных встречах за год (со сглаживанием) − 0.5;
 - rest     — разница log(1 + дней без игр), не больше 60 дней;
-- exp      — разница log(1 + сыгранных карт).
+- exp      — разница log(1 + сыгранных карт);
+- patch    — разница винрейта в текущем патче (со сглаживанием);
+- roster   — разница стабильности состава: сколько из 5 игроков последней карты
+             входят в основной состав за 10 карт (замена или стендин снижают её).
 
 Логистическая регрессия заодно калибрует сам Elo: «сырые» вероятности рейтинга
 обычно слишком уверенные. Проверка честная: модель учится на старых картах и
 проверяется на последних, которых при обучении не видела.
 
-Чего пока нет: патч, составы и драфт (их нет в списке про-матчей OpenDota;
-нужны отдельные запросы по каждому матчу — следующий шаг).
+Чего пока нет: драфт (нужен для режима «после драфта» — следующий шаг).
 """
 
 from __future__ import annotations
 
 import math
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 
 from .rating import DAY, EloModel, Evaluation, evaluate
 
-FEATURES = ("elo", "form10", "form30", "h2h", "rest", "exp")
+FEATURES = ("elo", "form10", "form30", "h2h", "rest", "exp", "patch", "roster")
 
 
 @dataclass
@@ -33,6 +35,15 @@ class TeamHistory:
     recent: deque = field(default_factory=deque)                      # (время, 1/0) за 30 дней
     last_time: int | None = None
     games: int = 0
+    by_patch: dict = field(default_factory=dict)                      # патч -> [побед, карт]
+    lineups: deque = field(default_factory=lambda: deque(maxlen=10))  # составы последних карт
+
+    def stability(self) -> float:
+        known = [l for l in self.lineups if l]
+        if len(known) < 3:
+            return 1.0
+        core = {acc for acc, _ in Counter(a for l in known for a in l).most_common(5)}
+        return len(known[-1] & core) / 5
 
 
 def _smooth(wins: float, n: int, prior: float = 5.0) -> float:
@@ -46,6 +57,10 @@ class FeatureState:
     elo: EloModel = field(default_factory=EloModel)
     teams: dict[int, TeamHistory] = field(default_factory=dict)
     h2h: dict[tuple[int, int], deque] = field(default_factory=dict)   # (меньший id, больший id) -> (время, победитель)
+    patches: object = None                                           # PatchIndex или None
+
+    def patch_at(self, now: int) -> str | None:
+        return self.patches.at(now) if self.patches is not None else None
 
     def _team(self, tid: int) -> TeamHistory:
         return self.teams.setdefault(tid, TeamHistory())
@@ -59,22 +74,35 @@ class FeatureState:
         rest = math.log1p(min(60.0, (now - h.last_time) / DAY)) if h.last_time is not None else math.log1p(60)
         return f10, f30, rest, math.log1p(h.games)
 
-    def features(self, a: int, b: int, now: int) -> list[float]:
+    def features(self, a: int, b: int, now: int, patch: str | None = None) -> list[float]:
         ra, rb = self.elo.rating(a, now).rating, self.elo.rating(b, now).rating
         fa, fb = self._team_side(a, now), self._team_side(b, now)
         key = (min(a, b), max(a, b))
         meetings = [w for t, w in self.h2h.get(key, ()) if t >= now - 365 * DAY]
         h2h = (sum(1 for w in meetings if w == a) + 1) / (len(meetings) + 2) - 0.5
-        return [(ra - rb) / 400, fa[0] - fb[0], fa[1] - fb[1], h2h, fa[2] - fb[2], fa[3] - fb[3]]
+        patch = patch or self.patch_at(now)
+        ha, hb = self._team(a), self._team(b)
+        pa = _smooth(*ha.by_patch.get(patch, (0, 0)), prior=10) if patch else 0.5
+        pb = _smooth(*hb.by_patch.get(patch, (0, 0)), prior=10) if patch else 0.5
+        return [(ra - rb) / 400, fa[0] - fb[0], fa[1] - fb[1], h2h, fa[2] - fb[2], fa[3] - fb[3],
+                pa - pb, ha.stability() - hb.stability()]
 
-    def update(self, winner: int, loser: int, now: int, wname: str = "", lname: str = "") -> None:
+    def update(self, winner: int, loser: int, now: int, wname: str = "", lname: str = "",
+               patch: str | None = None, lineups: tuple = (None, None)) -> None:
         self.elo.update(winner, loser, now, wname, lname)
-        for tid, won in ((winner, 1), (loser, 0)):
+        patch = patch or self.patch_at(now)
+        for (tid, won), lineup in zip(((winner, 1), (loser, 0)), lineups):
             h = self._team(tid)
             h.last10.append(won)
             h.recent.append((now, won))
             h.last_time = now
             h.games += 1
+            if patch:
+                rec = h.by_patch.setdefault(patch, [0, 0])
+                rec[0] += won
+                rec[1] += 1
+            if lineup:
+                h.lineups.append(lineup)
         self.h2h.setdefault((min(winner, loser), max(winner, loser)), deque(maxlen=20)).append((now, winner))
 
 
@@ -159,9 +187,12 @@ class Report:
     train: int
 
 
-def _walk(maps, elo_params: dict, min_games: int, collect_since: int | None = None):
-    """Один проход по картам: признаки до обновления. Возвращает (state, samples)."""
-    st = FeatureState(elo=EloModel(**elo_params))
+def _walk(maps, elo_params: dict, min_games: int, collect_since: int | None = None, patches=None):
+    """Один проход по картам: признаки до обновления. Возвращает (state, samples).
+
+    У карты могут быть поля lineup_r / lineup_d (frozenset игроков) — для стабильности состава.
+    """
+    st = FeatureState(elo=EloModel(**elo_params), patches=patches)
     samples = []  # (время, признаки за radiant, radiant выиграл, сырой Elo-прогноз)
     for m in maps:
         r, d, t = m["radiant_team_id"], m["dire_team_id"], m["start_time"]
@@ -169,10 +200,11 @@ def _walk(maps, elo_params: dict, min_games: int, collect_since: int | None = No
         if rs.games >= min_games and ds.games >= min_games and (collect_since is None or t >= collect_since):
             x = st.features(r, d, t)
             samples.append((t, x, int(m["radiant_win"]), 1 / (1 + 10 ** (-x[0]))))
+        lr, ld = m.get("lineup_r"), m.get("lineup_d")
         if m["radiant_win"]:
-            st.update(r, d, t, m["radiant_name"] or "", m["dire_name"] or "")
+            st.update(r, d, t, m["radiant_name"] or "", m["dire_name"] or "", lineups=(lr, ld))
         else:
-            st.update(d, r, t, m["dire_name"] or "", m["radiant_name"] or "")
+            st.update(d, r, t, m["dire_name"] or "", m["radiant_name"] or "", lineups=(ld, lr))
     return st, samples
 
 
@@ -187,19 +219,19 @@ def _augment(samples):
 
 
 def train(maps, eval_since: int, min_games: int = 5,
-          grid=((24.0, 180.0), (16.0, 180.0), (32.0, 180.0), (24.0, 90.0), (24.0, 365.0))) -> tuple[MatchModel, Report]:
+          grid=((24.0, 180.0), (16.0, 180.0), (32.0, 180.0), (24.0, 90.0), (24.0, 365.0)), patches=None) -> tuple[MatchModel, Report]:
     """Подбирает параметры Elo, обучает веса на картах до eval_since, проверяет после, затем учит на всём."""
     maps = list(maps)
     best = None
     for k, hl in grid:
         params = {"k": k, "half_life_days": hl}
-        _, samples = _walk(maps, params, min_games)
+        _, samples = _walk(maps, params, min_games, patches=patches)
         val = [(p, y) for t, _, y, p in samples if t >= eval_since]
         ev = evaluate(val)
         if val and (best is None or ev.log_loss < best[0].log_loss):
             best = (ev, params, samples)
     if best is None:  # мало данных
-        st, _ = _walk(maps, {}, min_games)
+        st, _ = _walk(maps, {}, min_games, patches=patches)
         return MatchModel(st, [1.0 * math.log(10)] + [0.0] * (len(FEATURES) - 1)), Report(Evaluation(), Evaluation(), [], 24, 180, 0)
     elo_ev, params, samples = best
     train_s = [s for s in samples if s[0] < eval_since]
@@ -208,9 +240,10 @@ def train(maps, eval_since: int, min_games: int = 5,
     model_ev = evaluate([(_sigmoid(sum(wi * xi for wi, xi in zip(w, x))), y) for _, x, y, _ in val_s])
     # рабочая модель: веса на всех картах, состояние — на сегодня
     final_w = fit_logistic(*_augment(samples)) if samples else w
-    state, _ = _walk(maps, params, min_games, collect_since=10**12)
+    state, _ = _walk(maps, params, min_games, collect_since=10**12, patches=patches)
     return MatchModel(state, final_w), Report(elo_ev, model_ev, final_w, params["k"], params["half_life_days"], len(train_s))
 
 
 LABELS = {"elo": "рейтинг Elo", "form10": "форма (10 карт)", "form30": "форма (30 дней)", "h2h": "личные встречи",
-          "rest": "пауза без игр", "exp": "опыт (число карт)"}
+          "rest": "пауза без игр", "exp": "опыт (число карт)", "patch": "форма в текущем патче",
+          "roster": "стабильность состава"}
