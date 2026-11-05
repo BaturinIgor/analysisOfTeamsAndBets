@@ -110,7 +110,7 @@ def load_board(conn: sqlite3.Connection, since_hours: float = 6, now: datetime |
     out = []
     for mid, t1, t2, start, tour, score, seen in matches:
         open_markets = {m for (m,) in conn.execute(
-            "SELECT market FROM feed_markets WHERE source='oddiwire' AND fixture_id=? AND last_seen=?", (mid, seen))}
+            "SELECT market FROM feed_markets WHERE source='oddiwire' AND fixture_id=? AND last_seen>=?", (mid, seen))}
         tracked = conn.execute("SELECT 1 FROM feed_markets WHERE source='oddiwire' AND fixture_id=? LIMIT 1", (mid,)).fetchone()
         rows = conn.execute(
             """SELECT market, outcome, price, fair_prob, taken_at, phase FROM odds_snapshots

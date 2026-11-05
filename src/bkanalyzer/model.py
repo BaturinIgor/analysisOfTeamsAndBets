@@ -58,6 +58,43 @@ class FeatureState:
     teams: dict[int, TeamHistory] = field(default_factory=dict)
     h2h: dict[tuple[int, int], deque] = field(default_factory=dict)   # (меньший id, больший id) -> (время, победитель)
     patches: object = None                                           # PatchIndex или None
+    hero_patch: dict = field(default_factory=dict)    # (патч, герой) -> [побед, игр] в про-матчах
+    hero_all: dict = field(default_factory=dict)      # герой -> [побед, игр] за всё время
+    player_hero: dict = field(default_factory=dict)   # (игрок, герой) -> игр
+
+    def hero_strength(self, hero: int, patch: str | None) -> float:
+        """Логит винрейта героя в патче, сглаженный к его общему винрейту."""
+        w_all, n_all = self.hero_all.get(hero, (0, 0))
+        base = (w_all + 10) / (n_all + 20)
+        w, n = self.hero_patch.get((patch, hero), (0, 0)) if patch else (0, 0)
+        p = (w + 20 * base) / (n + 20)
+        return math.log(p / (1 - p))
+
+    def draft_features(self, picks_a, picks_b, now: int, patch: str | None = None) -> list[float]:
+        """[сила героев a − b, опыт игроков на своих героях a − b]; picks = [(игрок, герой)] × 5."""
+        patch = patch or self.patch_at(now)
+
+        def side(picks):
+            if not picks:
+                return 0.0, 0.0
+            hs = sum(self.hero_strength(h, patch) for _, h in picks) / len(picks)
+            ex = sum(math.log1p(self.player_hero.get((acc, h), 0)) for acc, h in picks) / len(picks)
+            return hs, ex
+
+        (ha, ea), (hb, eb) = side(picks_a), side(picks_b)
+        return [ha - hb, ea - eb]
+
+    def update_draft(self, picks_win, picks_lose, now: int, patch: str | None = None) -> None:
+        patch = patch or self.patch_at(now)
+        for picks, won in ((picks_win, 1), (picks_lose, 0)):
+            for acc, hero in picks or ():
+                if hero is None:
+                    continue
+                for key, table in (((patch, hero), self.hero_patch), (hero, self.hero_all)):
+                    rec = table.setdefault(key, [0, 0])
+                    rec[0] += won
+                    rec[1] += 1
+                self.player_hero[(acc, hero)] = self.player_hero.get((acc, hero), 0) + 1
 
     def patch_at(self, now: int) -> str | None:
         return self.patches.at(now) if self.patches is not None else None
@@ -162,10 +199,21 @@ class MatchModel:
 
     state: FeatureState
     weights: list[float]
+    draft_weights: list[float] | None = None   # [базовый логит, сила героев, опыт на героях]
 
     @property
     def teams(self):
         return self.state.elo.teams
+
+    def logit(self, a: int, b: int, now: int) -> float:
+        return sum(w * xi for w, xi in zip(self.weights, self.state.features(a, b, now)))
+
+    def predict_draft(self, a: int, b: int, now: int, picks_a, picks_b) -> float | None:
+        """Вероятность карты после драфта; None, если модель драфта не обучена."""
+        if not self.draft_weights:
+            return None
+        x = [self.logit(a, b, now)] + self.state.draft_features(picks_a, picks_b, now)
+        return _sigmoid(sum(w * xi for w, xi in zip(self.draft_weights, x)))
 
     def predict(self, a: int, b: int, now: int) -> float:
         x = self.state.features(a, b, now)
@@ -185,27 +233,37 @@ class Report:
     k: float
     half_life: float
     train: int
+    draft_base_eval: Evaluation = field(default_factory=Evaluation)  # модель без драфта на тех же картах
+    draft_eval: Evaluation = field(default_factory=Evaluation)
+    draft_weights: list[float] = field(default_factory=list)
 
 
 def _walk(maps, elo_params: dict, min_games: int, collect_since: int | None = None, patches=None):
-    """Один проход по картам: признаки до обновления. Возвращает (state, samples).
+    """Один проход по картам: признаки до обновления. Возвращает (state, samples, draft_samples).
 
-    У карты могут быть поля lineup_r / lineup_d (frozenset игроков) — для стабильности состава.
+    У карты могут быть поля lineup_r / lineup_d (frozenset игроков) и picks_r / picks_d
+    ([(игрок, герой)]) — для стабильности состава и драфта.
     """
     st = FeatureState(elo=EloModel(**elo_params), patches=patches)
-    samples = []  # (время, признаки за radiant, radiant выиграл, сырой Elo-прогноз)
+    samples = []   # (время, признаки за radiant, radiant выиграл, сырой Elo-прогноз)
+    dsamples = []  # (время, признаки за radiant, признаки драфта за radiant, radiant выиграл)
     for m in maps:
         r, d, t = m["radiant_team_id"], m["dire_team_id"], m["start_time"]
         rs, ds = st.elo.rating(r, t), st.elo.rating(d, t)
+        pr, pd = m.get("picks_r"), m.get("picks_d")
         if rs.games >= min_games and ds.games >= min_games and (collect_since is None or t >= collect_since):
             x = st.features(r, d, t)
             samples.append((t, x, int(m["radiant_win"]), 1 / (1 + 10 ** (-x[0]))))
+            if pr and pd and len(pr) == 5 and len(pd) == 5:
+                dsamples.append((t, x, st.draft_features(pr, pd, t), int(m["radiant_win"])))
         lr, ld = m.get("lineup_r"), m.get("lineup_d")
         if m["radiant_win"]:
             st.update(r, d, t, m["radiant_name"] or "", m["dire_name"] or "", lineups=(lr, ld))
+            st.update_draft(pr, pd, t)
         else:
             st.update(d, r, t, m["dire_name"] or "", m["radiant_name"] or "", lineups=(ld, lr))
-    return st, samples
+            st.update_draft(pd, pr, t)
+    return st, samples, dsamples
 
 
 def _augment(samples):
@@ -225,25 +283,44 @@ def train(maps, eval_since: int, min_games: int = 5,
     best = None
     for k, hl in grid:
         params = {"k": k, "half_life_days": hl}
-        _, samples = _walk(maps, params, min_games, patches=patches)
+        _, samples, dsamples = _walk(maps, params, min_games, patches=patches)
         val = [(p, y) for t, _, y, p in samples if t >= eval_since]
         ev = evaluate(val)
         if val and (best is None or ev.log_loss < best[0].log_loss):
-            best = (ev, params, samples)
+            best = (ev, params, samples, dsamples)
     if best is None:  # мало данных
-        st, _ = _walk(maps, {}, min_games, patches=patches)
+        st, _, _ = _walk(maps, {}, min_games, patches=patches)
         return MatchModel(st, [1.0 * math.log(10)] + [0.0] * (len(FEATURES) - 1)), Report(Evaluation(), Evaluation(), [], 24, 180, 0)
-    elo_ev, params, samples = best
+    elo_ev, params, samples, dsamples = best
     train_s = [s for s in samples if s[0] < eval_since]
     val_s = [s for s in samples if s[0] >= eval_since]
     w = fit_logistic(*_augment(train_s)) if train_s else [math.log(10)] + [0.0] * (len(FEATURES) - 1)
     model_ev = evaluate([(_sigmoid(sum(wi * xi for wi, xi in zip(w, x))), y) for _, x, y, _ in val_s])
     # рабочая модель: веса на всех картах, состояние — на сегодня
     final_w = fit_logistic(*_augment(samples)) if samples else w
-    state, _ = _walk(maps, params, min_games, collect_since=10**12, patches=patches)
-    return MatchModel(state, final_w), Report(elo_ev, model_ev, final_w, params["k"], params["half_life_days"], len(train_s))
+    state, _, _ = _walk(maps, params, min_games, collect_since=10**12, patches=patches)
+    report = Report(elo_ev, model_ev, final_w, params["k"], params["half_life_days"], len(train_s))
+
+    # модель после драфта: базовый логит + сила героев + опыт игроков на героях
+    def drows(rows, weights):
+        return [(t, [sum(a * b for a, b in zip(weights, x))] + dx, 0, y) for t, x, dx, y in rows]
+
+    dtrain = [r for r in dsamples if r[0] < eval_since]
+    dval = [r for r in dsamples if r[0] >= eval_since]
+    draft_w = None
+    if len(dtrain) >= 200 and dval:
+        dw = fit_logistic(*_augment([(t, x, y, 0) for t, x, _, y in drows(dtrain, w)]))
+        rows = drows(dval, w)
+        report.draft_base_eval = evaluate([(_sigmoid(x[0]), y) for _, x, _, y in rows])
+        report.draft_eval = evaluate([(_sigmoid(sum(a * b for a, b in zip(dw, x))), y) for _, x, _, y in rows])
+    # рабочая модель драфта — на всех картах с драфтом, даже если на проверку их не хватило
+    if len(dsamples) >= 200:
+        draft_w = fit_logistic(*_augment([(t, x, y, 0) for t, x, _, y in drows(dsamples, final_w)]))
+        report.draft_weights = draft_w
+    return MatchModel(state, final_w, draft_w), report
 
 
 LABELS = {"elo": "рейтинг Elo", "form10": "форма (10 карт)", "form30": "форма (30 дней)", "h2h": "личные встречи",
           "rest": "пауза без игр", "exp": "опыт (число карт)", "patch": "форма в текущем патче",
           "roster": "стабильность состава"}
+DRAFT_LABELS = ("модель до драфта", "сила героев в патче", "опыт игроков на героях")

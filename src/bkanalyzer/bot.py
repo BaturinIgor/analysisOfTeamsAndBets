@@ -60,9 +60,12 @@ class ModelCache:
 
             maps = [dict(r) for r in history.tier_maps(conn)]
             conn.row_factory = None
-            lineups = details.lineups(conn)
+            all_picks = details.picks(conn)
             for m in maps:
-                m["lineup_r"], m["lineup_d"] = lineups.get(m["match_id"], (None, None))
+                pr, pd = all_picks.get(m["match_id"], (None, None))
+                m["picks_r"], m["picks_d"] = pr, pd
+                m["lineup_r"] = frozenset(a for a, _ in pr) if pr else None
+                m["lineup_d"] = frozenset(a for a, _ in pd) if pd else None
             patches = details.PatchIndex.load(conn)
             since = (maps[-1]["start_time"] - self.eval_days * 86400) if maps else 0
             self._model, self.report = mm.train(maps, since, patches=patches if patches.names else None)
@@ -220,6 +223,14 @@ class Bot:
                  "  (меньше Brier и log-loss — лучше; монетка: 0.25 и 0.693)",
                  "Калибровка модели (прогноз фаворита → факт):"]
         lines += [f"  {rng}: карт {n}, прогноз {p:.0%}, факт {y:.0%}" for rng, n, p, y in r.model_eval.buckets]
+        if r.draft_eval.n:
+            from .model import DRAFT_LABELS
+
+            lines.append(f"После драфта ({r.draft_eval.n} карт с героями): без драфта log-loss {r.draft_base_eval.log_loss:.4f}, "
+                         f"с драфтом {r.draft_eval.log_loss:.4f}; точность {r.draft_base_eval.accuracy:.1%} → {r.draft_eval.accuracy:.1%}")
+            lines.append("  Веса драфта: " + ", ".join(f"{n} {w:+.2f}" for n, w in zip(DRAFT_LABELS, r.draft_weights)))
+        else:
+            lines.append("Модели драфта пока нет: нужны составы с героями (bk sync-matches).")
         lines.append(f"Elo: K={r.k:.0f}, полураспад {r.half_life:.0f} дн. Веса: " + ", ".join(f"{LABELS[f]} {w:+.2f}" for f, w in zip(FEATURES, r.weights)))
         return "\n".join(lines)
 

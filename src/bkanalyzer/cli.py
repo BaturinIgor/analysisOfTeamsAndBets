@@ -174,6 +174,59 @@ def simulate_step(s: Settings, conn, models, od=None, last_sync: list | None = N
             notify(sim.settled_message(b))
 
 
+def draft_step(s: Settings, conn, models, od, ow, seen: set, notify=None, log=print, now: int | None = None,
+               max_game_time: int | None = None) -> list[dict]:
+    """Раз в минуту: ищем готовые драфты матчей из линии и ставим «после драфта»."""
+    from . import analysis, draft, sim
+    from .sources import oddiwire as ow_mod
+
+    now = now or int(time.time())
+    max_game_time = draft.MAX_GAME_TIME if max_game_time is None else max_game_time
+    live = [m for m in analysis.load_board(conn) if m.phase == "live"]
+    if not live:
+        return []
+    drafts = [d for d in draft.parse_live(od.live()) if d.complete and d.match_id not in seen]
+    if not drafts:
+        return []
+    model, _ = models.get(conn)
+    placed = []
+    for bm in live:
+        found = draft.find_draft(drafts, model, bm)
+        if not found:
+            continue
+        d, team1_radiant = found
+        seen.add(d.match_id)
+        if d.game_time > max_game_time:
+            continue  # опоздали: линия уже учитывает ход игры
+        # свежий коэффициент на эту карту (1 запрос к OddiWire)
+        if ow is not None:
+            try:
+                used, limit = ow.budget()
+                if used < limit:
+                    full = ow.call("get_fixture", {"fixture_id": bm.fixture_id, "tier": 3})
+                    full = full.get("event", full) if isinstance(full, dict) else {}
+                    ev = {"event_id": bm.fixture_id, "event_type": "live", "status": "LIVE", "home": bm.team1, "away": bm.team2,
+                          "starts": bm.start_time, "markets": (full or {}).get("markets") or []}
+                    db.save_feed_rows(conn, ow_mod.event_rows(ev), source="oddiwire", taken_at=db._now())
+                    bm = next((m for m in analysis.load_board(conn) if m.fixture_id == bm.fixture_id), bm)
+            except SourceError as exc:
+                log(f"  драфт: свежий коэффициент не получен ({exc})")
+        res = draft.draft_pick(model, bm, d, team1_radiant, now)
+        if not res:
+            continue
+        p, picks = res
+        best = draft.best_signal(picks, s.thresholds())
+        log(f"  драфт {bm.team1} — {bm.team2}: наша {p:.0%}, сигнал: {'да' if best else 'нет'}")
+        if best is None:
+            continue
+        bet = sim.place_pick(conn, draft.as_analysis(bm, picks), best, "draft", s.sim())
+        if notify:
+            notify(draft.message(bm, p, best, bet is not None))
+        if bet:
+            placed.append(bet)
+    return placed
+
+
 def run_collector(s: Settings, conn, interval: int = 600, maps: bool = True, once: bool = False, stop=lambda: False, log=print,
                   simulate: bool = False, notify=None) -> int:
     """Цикл сбора OddiWire: держит дневную квоту и ждёт, когда сервис просит подождать."""
@@ -182,7 +235,7 @@ def run_collector(s: Settings, conn, interval: int = 600, maps: bool = True, onc
     from .bot import ModelCache
 
     ow = OddiWire(make_client(s.user_agent), s.oddiwire_api_key)
-    models, last_sync = ModelCache(), [0.0]
+    models, last_sync, drafts_seen = ModelCache(), [0.0], set()
     od = OpenDota(make_client(s.user_agent), s.opendota_api_key) if simulate else None
     if not s.oddiwire_api_key:
         log("ODDIWIRE_API_KEY не задан: работаем на общем демо-ключе (10 запросов за 5 минут на всех).")
@@ -207,7 +260,14 @@ def run_collector(s: Settings, conn, interval: int = 600, maps: bool = True, onc
         if once:
             return 0
         deadline = time.monotonic() + pause
+        next_draft = 0.0
         while time.monotonic() < deadline and not stop():
+            if simulate and od is not None and time.monotonic() >= next_draft:
+                next_draft = time.monotonic() + 60
+                try:
+                    draft_step(s, conn, models, od, ow, drafts_seen, notify, log)
+                except Exception as exc:  # драфт — дополнительная функция, сбор линии не должен падать
+                    log(f"  драфт: {exc!r}")
             time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
     return 0
 

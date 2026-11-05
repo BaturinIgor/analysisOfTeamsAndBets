@@ -19,7 +19,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS paper_bets (
     id INTEGER PRIMARY KEY,
     created_at TEXT NOT NULL,
-    mode TEXT NOT NULL,              -- prematch | live
+    mode TEXT NOT NULL,              -- prematch | draft | live
     fixture_id TEXT NOT NULL,
     start_time TEXT,
     team1 TEXT, team2 TEXT,
@@ -40,8 +40,8 @@ CREATE TABLE IF NOT EXISTS paper_bets (
 );
 """
 
-MODES = ("prematch", "live")
-MODE_LABEL = {"prematch": "до матча", "live": "в эфире"}
+MODES = ("prematch", "draft", "live")
+MODE_LABEL = {"prematch": "до матча", "draft": "после драфта", "live": "в эфире"}
 
 
 @dataclass
@@ -78,37 +78,40 @@ def stake_for(cfg: SimSettings, bank_now: float, price: float, prob: float) -> f
     return round(min(amount, bank_now * cfg.max_stake_share, bank_now), 2)
 
 
+def place_pick(conn: sqlite3.Connection, a: Analysis, pick, mode: str, cfg: SimSettings, now: datetime | None = None) -> dict | None:
+    """Одна бумажная ставка, если в этом режиме по матчу ещё не ставили и исход неизвестен."""
+    ensure_schema(conn)
+    now = now or datetime.now(timezone.utc)
+    if conn.execute("SELECT 1 FROM paper_bets WHERE fixture_id=? AND mode=?", (a.match.fixture_id, mode)).fetchone():
+        return None
+    if result_known(conn, a, pick):
+        return None  # исход уже есть в OpenDota — линия устарела, ставить нельзя
+    b = bank(conn, mode, cfg)
+    stake = stake_for(cfg, b, pick.price, pick.prob)
+    if stake <= 0:
+        return None
+    row = {
+        "created_at": now.isoformat(timespec="seconds"), "mode": mode, "fixture_id": a.match.fixture_id,
+        "start_time": a.match.start_time, "team1": a.match.team1, "team2": a.match.team2,
+        "market": pick.market, "pick": pick.team, "price": pick.price, "prob": pick.prob,
+        "book_prob": pick.book_prob, "stake": stake, "bank_before": b, "strategy": cfg.strategy,
+    }
+    conn.execute(f"INSERT INTO paper_bets ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
+    conn.commit()
+    return {**row, "ev": pick.ev}
+
+
 def place_bets(conn: sqlite3.Connection, analyses: list[Analysis], thresholds: Thresholds, cfg: SimSettings,
                now: datetime | None = None) -> list[dict]:
     """Ставит по одному лучшему сигналу на матч в его текущем режиме. Возвращает новые ставки."""
-    ensure_schema(conn)
-    now = now or datetime.now(timezone.utc)
     placed = []
     for a in analyses:
         mode = "live" if a.match.phase == "live" else "prematch"
         picks = [p for p in a.picks if thresholds.ok(p)]
-        if not picks:
-            continue
-        if conn.execute("SELECT 1 FROM paper_bets WHERE fixture_id=? AND mode=?", (a.match.fixture_id, mode)).fetchone():
-            continue
-        best = max(picks, key=lambda p: p.ev)
-        if result_known(conn, a, best):
-            continue  # исход уже есть в OpenDota — линия устарела, ставить нельзя
-        b = bank(conn, mode, cfg)
-        stake = stake_for(cfg, b, best.price, best.prob)
-        if stake <= 0:
-            continue
-        row = {
-            "created_at": now.isoformat(timespec="seconds"), "mode": mode, "fixture_id": a.match.fixture_id,
-            "start_time": a.match.start_time, "team1": a.match.team1, "team2": a.match.team2,
-            "market": best.market, "pick": best.team, "price": best.price, "prob": best.prob,
-            "book_prob": best.book_prob, "stake": stake, "bank_before": b, "strategy": cfg.strategy,
-        }
-        conn.execute(
-            f"INSERT INTO paper_bets ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", tuple(row.values())
-        )
-        placed.append({**row, "ev": best.ev})
-    conn.commit()
+        if picks:
+            b = place_pick(conn, a, max(picks, key=lambda p: p.ev), mode, cfg, now)
+            if b:
+                placed.append(b)
     return placed
 
 
