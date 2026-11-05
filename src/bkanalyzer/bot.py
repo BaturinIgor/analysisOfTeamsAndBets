@@ -254,7 +254,10 @@ class Bot:
             f"{LABELS[f]} {w:+.2f}" for f, w in zip(FEATURES, r.weights) if f in (r.selected or FEATURES)))
         dropped = [LABELS[f] for f in FEATURES if r.selected and f not in r.selected]
         if dropped:
-            lines.append("Отброшены (не улучшали прогноз на обучающих картах): " + ", ".join(dropped))
+            lines.append("Отброшены (не улучшали прогноз): " + ", ".join(dropped))
+        if r.features_eval is not None:
+            lines.append(f"Признаки команд проиграли рейтингу на последних днях (log-loss {r.features_eval.log_loss:.4f}), "
+                         "поэтому до драфта работает рейтинг Elo, а драфт добавляется сверху.")
         return "\n".join(lines)
 
     def settings(self) -> str:
