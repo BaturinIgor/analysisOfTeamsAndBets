@@ -519,6 +519,9 @@ def main(argv: list[str] | None = None) -> int:
     p_re.add_argument("--eval-days", type=int, default=180, help="за сколько последних дней оценивать прогнозы")
     p_re.add_argument("--top", type=int, default=20)
 
+    p_me = sub.add_parser("model-eval", help="сравнить модель с чистым рейтингом на последних днях")
+    p_me.add_argument("--eval-days", type=int, default=180)
+
     p_pr = sub.add_parser("predict", help="вероятность победы в серии по рейтингу")
     p_pr.add_argument("team1")
     p_pr.add_argument("team2")
@@ -602,6 +605,17 @@ def main(argv: list[str] | None = None) -> int:
                     return 0
                 time.sleep(args.interval)
         return run_collector(s, conn, args.interval, maps=not args.no_maps, once=args.once)
+
+    if args.cmd == "model-eval":
+        from .bot import Bot, ModelCache
+
+        conn = db.connect(Path(s.db_path))
+        b = Bot(conn, (0,))
+        b.models = ModelCache(args.eval_days)
+        t0 = time.monotonic()
+        print(b.model_report())
+        print(f"(обучение заняло {time.monotonic() - t0:.0f} с)")
+        return 0
 
     if args.cmd == "sim-reset":
         from . import sim
