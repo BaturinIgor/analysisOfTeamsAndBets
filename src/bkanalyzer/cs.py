@@ -86,33 +86,38 @@ def sync(conn: sqlite3.Connection, ps, days: int = 365, *, now: float | None = N
     """Загружает сыгранные серии CS2 за days дней (от новых к старым), пока не дойдёт до уже загруженных."""
     ensure_schema(conn)
     since = (now or time.time()) - days * 86400
-    row = conn.execute("SELECT value FROM cs_sync WHERE key='backfilled_since'").fetchone()
+    # v2: метка первой версии могла записаться после обрыва на первой странице — её не учитываем
+    row = conn.execute("SELECT value FROM cs_sync WHERE key='backfilled_since_v2'").fetchone()
     covered = row is not None and row[0] <= since
-    saved = 0
+    saved = seen = kept = 0
     complete = False
     for page in range(1, max_pages + 1):
         items = ps.cs_past(page=page)
         if not items:
             complete = True  # старше данных нет
             break
+        seen += len(items)
         rows = [r for m in items for r in series_maps(m) if r[1] >= since]
+        kept += len({r[4] for r in rows})
         before = conn.total_changes
         conn.executemany("INSERT OR IGNORE INTO cs_maps VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
         conn.commit()
         added = conn.total_changes - before
         saved += added
-        oldest = min((_ts(m.get("begin_at") or m.get("scheduled_at")) or 0 for m in items), default=0)
-        if oldest < since:
+        # у отменённых серий даты может не быть — по ним границу окна не определяем
+        stamps = [t for t in (_ts(m.get("begin_at") or m.get("scheduled_at")) for m in items) if t]
+        if stamps and min(stamps) < since:
             complete = True
             break
         if covered and added == 0 and rows:
             break  # дошли до уже загруженного
         if page % 10 == 0:
-            log(f"  CS2: страниц {page}, новых карт {saved}")
+            log(f"  CS2: страниц {page}, серий {seen} (сыграно {kept}), новых карт {saved}")
         sleep(pause)
     if complete and not covered:
-        conn.execute("INSERT OR REPLACE INTO cs_sync VALUES ('backfilled_since', ?)", (int(since),))
+        conn.execute("INSERT OR REPLACE INTO cs_sync VALUES ('backfilled_since_v2', ?)", (int(since),))
         conn.commit()
+    log(f"  CS2: страниц {page if items else page - 1}, серий {seen}, из них сыграно со счётом {kept}")
     return saved
 
 
