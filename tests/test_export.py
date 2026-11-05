@@ -38,7 +38,7 @@ def test_export_xlsx_and_csv(tmp_path):
     assert bets.max_row >= 2 and bets.cell(2, 16).value == "проигрыш"
     assert bets.cell(2, 1).fill.fgColor.rgb.endswith("FFC7CE")  # проигрыш — красный
     summary = {row[0]: row for row in wb["Итоги"].iter_rows(min_row=2, values_only=True)}
-    assert summary["до матча"][4] >= 1
+    assert summary["до матча"][1] == "фикс. сумма" and summary["до матча"][5] >= 1
     csv_bets = next(p for p in (tmp_path / "exports").iterdir() if p.name.endswith("_bets.csv"))
     with csv_bets.open(encoding="utf-8-sig") as f:
         head = next(csv.reader(f, delimiter=";"))

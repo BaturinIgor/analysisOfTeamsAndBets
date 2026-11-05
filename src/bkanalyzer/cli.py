@@ -171,10 +171,10 @@ def simulate_step(s: Settings, conn, models, od=None, last_sync: list | None = N
         log("  " + sim.placed_message(b))
         if notify:
             notify(sim.placed_message(b))
-    for b in sim.settle(conn):
-        log("  " + sim.settled_message(b))
+    for text in sim.settled_messages(sim.settle(conn)):
+        log("  " + text)
         if notify:
-            notify(sim.settled_message(b))
+            notify(text)
 
 
 def draft_step(s: Settings, conn, models, od, ow, seen: set, notify=None, log=print, now: int | None = None,

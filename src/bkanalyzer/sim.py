@@ -1,8 +1,10 @@
 """Симулятор бумажных ставок (ТР-20 … ТР-23).
 
 - По каждому сигналу делается бумажная ставка: не больше одной на матч в каждом режиме
-  («до матча» и «в эфире» считаются раздельно, у каждого свой банк).
-- Сумма — по стратегии: фиксированная, процент банка или дробный Келли.
+  («до матча», «после драфта», «в эфире» считаются раздельно, у каждого свой банк).
+- Стратегии идут параллельно на одних и тех же сигналах (SIM_STRATEGIES): у каждой
+  стратегии в каждом режиме свой банк, поэтому их можно честно сравнить.
+- Сумма — по стратегии: фиксированная, процент банка или Келли.
 - Расчёт — по результатам карт из OpenDota (bk sync-matches / автообновление в боте).
 - CLV для ставок до матча — по последнему коэффициенту перед стартом.
 """
@@ -10,7 +12,7 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 from .analysis import Analysis, Thresholds, market_label, normalize
@@ -36,7 +38,7 @@ CREATE TABLE IF NOT EXISTS paper_bets (
     closing_price REAL,
     settled_at TEXT,
     note TEXT,
-    UNIQUE (fixture_id, mode)
+    UNIQUE (fixture_id, mode, strategy)
 );
 """
 
@@ -44,24 +46,41 @@ MODES = ("prematch", "draft", "live")
 MODE_LABEL = {"prematch": "до матча", "draft": "после драфта", "live": "в эфире"}
 
 
+STRATEGY_LABEL = {"fixed": "фикс. сумма", "percent": "% банка", "kelly": "Келли"}
+
+
 @dataclass
 class SimSettings:
-    bank: float = 10000.0
-    strategy: str = "fixed"      # fixed | percent | kelly
-    stake: float = 100.0         # для fixed
-    percent: float = 0.02        # для percent
-    kelly: float = 0.25          # доля Келли
+    bank: float = 25000.0
+    strategy: str = "fixed"      # fixed | percent | kelly — текущая (для расчёта суммы)
+    stake: float = 1250.0        # для fixed (5% стартового банка)
+    percent: float = 0.07        # для percent
+    kelly: float = 1.0           # доля Келли (с потолком max_stake_share)
     max_stake_share: float = 0.1  # не больше 10% банка в одной ставке
+    strategies: tuple = ()       # параллельные стратегии; пусто — только strategy
+
+    def all(self) -> list["SimSettings"]:
+        return [replace(self, strategy=name, strategies=()) for name in (self.strategies or (self.strategy,))]
+
+    def describe(self) -> str:
+        parts = {"fixed": f"фикс. {self.stake:.0f}", "percent": f"{self.percent:.0%} банка", "kelly": f"Келли ×{self.kelly:g}"}
+        return ", ".join(parts.get(c.strategy, c.strategy) for c in self.all())
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE name='paper_bets'").fetchone()
+    if row and "UNIQUE (fixture_id, mode)" in row[0]:
+        # старая схема: одна стратегия на матч — переносим ставки в новую таблицу
+        conn.executescript("ALTER TABLE paper_bets RENAME TO paper_bets_old;" + SCHEMA +
+                           "INSERT INTO paper_bets SELECT * FROM paper_bets_old; DROP TABLE paper_bets_old;")
     conn.executescript(SCHEMA)
 
 
 def bank(conn: sqlite3.Connection, mode: str, cfg: SimSettings) -> float:
-    """Банк = стартовый + прибыль по рассчитанным − суммы открытых ставок."""
-    settled = conn.execute("SELECT COALESCE(SUM(profit), 0) FROM paper_bets WHERE mode=? AND status IN ('won','lost','void')", (mode,)).fetchone()[0]
-    open_stakes = conn.execute("SELECT COALESCE(SUM(stake), 0) FROM paper_bets WHERE mode=? AND status='open'", (mode,)).fetchone()[0]
+    """Банк стратегии в режиме = стартовый + прибыль по рассчитанным − суммы открытых ставок."""
+    q = "SELECT COALESCE(SUM({}), 0) FROM paper_bets WHERE mode=? AND strategy=? AND status {}"
+    settled = conn.execute(q.format("profit", "IN ('won','lost','void')"), (mode, cfg.strategy)).fetchone()[0]
+    open_stakes = conn.execute(q.format("stake", "= 'open'"), (mode, cfg.strategy)).fetchone()[0]
     return cfg.bank + settled - open_stakes
 
 
@@ -79,26 +98,33 @@ def stake_for(cfg: SimSettings, bank_now: float, price: float, prob: float) -> f
 
 
 def place_pick(conn: sqlite3.Connection, a: Analysis, pick, mode: str, cfg: SimSettings, now: datetime | None = None) -> dict | None:
-    """Одна бумажная ставка, если в этом режиме по матчу ещё не ставили и исход неизвестен."""
+    """Бумажная ставка по сигналу — по одной на каждую стратегию, если в этом режиме по матчу ещё не ставили.
+
+    Возвращает первую ставку и суммы всех стратегий в поле stakes (для одного уведомления).
+    """
     ensure_schema(conn)
     now = now or datetime.now(timezone.utc)
     if conn.execute("SELECT 1 FROM paper_bets WHERE fixture_id=? AND mode=?", (a.match.fixture_id, mode)).fetchone():
         return None
     if result_known(conn, a, pick):
         return None  # исход уже есть в OpenDota — линия устарела, ставить нельзя
-    b = bank(conn, mode, cfg)
-    stake = stake_for(cfg, b, pick.price, pick.prob)
-    if stake <= 0:
-        return None
-    row = {
-        "created_at": now.isoformat(timespec="seconds"), "mode": mode, "fixture_id": a.match.fixture_id,
-        "start_time": a.match.start_time, "team1": a.match.team1, "team2": a.match.team2,
-        "market": pick.market, "pick": pick.team, "price": pick.price, "prob": pick.prob,
-        "book_prob": pick.book_prob, "stake": stake, "bank_before": b, "strategy": cfg.strategy,
-    }
-    conn.execute(f"INSERT INTO paper_bets ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
+    first, stakes = None, {}
+    for c in cfg.all():
+        b = bank(conn, mode, c)
+        stake = stake_for(c, b, pick.price, pick.prob)
+        if stake <= 0:
+            continue
+        row = {
+            "created_at": now.isoformat(timespec="seconds"), "mode": mode, "fixture_id": a.match.fixture_id,
+            "start_time": a.match.start_time, "team1": a.match.team1, "team2": a.match.team2,
+            "market": pick.market, "pick": pick.team, "price": pick.price, "prob": pick.prob,
+            "book_prob": pick.book_prob, "stake": stake, "bank_before": b, "strategy": c.strategy,
+        }
+        conn.execute(f"INSERT INTO paper_bets ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
+        stakes[c.strategy] = stake
+        first = first or row
     conn.commit()
-    return {**row, "ev": pick.ev}
+    return {**first, "ev": pick.ev, "stakes": stakes} if first else None
 
 
 def place_bets(conn: sqlite3.Connection, analyses: list[Analysis], thresholds: Thresholds, cfg: SimSettings,
@@ -241,7 +267,8 @@ def settle(conn: sqlite3.Connection, now: datetime | None = None, void_after_day
 def summary(conn: sqlite3.Connection, cfg: SimSettings, mode: str) -> dict:
     ensure_schema(conn)
     conn.row_factory = sqlite3.Row
-    rows = [dict(r) for r in conn.execute("SELECT * FROM paper_bets WHERE mode=? ORDER BY id", (mode,)).fetchall()]
+    rows = [dict(r) for r in conn.execute("SELECT * FROM paper_bets WHERE mode=? AND strategy=? ORDER BY id",
+                                          (mode, cfg.strategy)).fetchall()]
     conn.row_factory = None
     settled = [r for r in rows if r["status"] in ("won", "lost")]
     staked = sum(r["stake"] for r in settled)
@@ -258,7 +285,7 @@ def summary(conn: sqlite3.Connection, cfg: SimSettings, mode: str) -> dict:
         worst = max(worst, streak)
     clv = [r["price"] / r["closing_price"] - 1 for r in settled if r.get("closing_price")]
     return {
-        "mode": mode, "bets": len(rows), "open": sum(r["status"] == "open" for r in rows),
+        "mode": mode, "strategy": cfg.strategy, "bets": len(rows), "open": sum(r["status"] == "open" for r in rows),
         "won": sum(r["status"] == "won" for r in rows), "lost": sum(r["status"] == "lost" for r in rows),
         "void": sum(r["status"] == "void" for r in rows), "staked": staked, "profit": profit,
         "roi": profit / staked if staked else None, "bank": bank(conn, mode, cfg) + sum(r["stake"] for r in rows if r["status"] == "open"),
@@ -266,32 +293,59 @@ def summary(conn: sqlite3.Connection, cfg: SimSettings, mode: str) -> dict:
     }
 
 
-def bet_line(r: dict) -> str:
+def bet_line(r: dict, with_stake: bool = True) -> str:
     icon = {"open": "⏳", "won": "✅", "lost": "❌", "void": "↩️"}[r["status"]]
+    if not with_stake:
+        return f"{icon} {r['team1']} — {r['team2']}, {market_label(r['market'])}: {r['pick']} @ {r['price']:.2f}"
     tail = f" → {r['profit']:+.0f}" if r["status"] != "open" else ""
     return f"{icon} {r['team1']} — {r['team2']}, {market_label(r['market'])}: {r['pick']} @ {r['price']:.2f}, ставка {r['stake']:.0f}{tail}"
 
 
 def report(conn: sqlite3.Connection, cfg: SimSettings) -> str:
-    lines = [f"Симулятор: старт {cfg.bank:.0f}, стратегия {cfg.strategy}"]
+    strategies = cfg.all()
+    lines = [f"Симулятор: старт {cfg.bank:.0f} у каждой стратегии; {cfg.describe()}"]
+    total = 0
     for mode in MODES:
-        s = summary(conn, cfg, mode)
-        lines.append(f"\n{MODE_LABEL[mode].capitalize()}: ставок {s['bets']} (открыто {s['open']}, ✅ {s['won']}, ❌ {s['lost']}, ↩️ {s['void']})")
-        if s["won"] + s["lost"]:
-            lines.append(f"  банк {s['bank']:.0f}, прибыль {s['profit']:+.0f}, ROI {s['roi']:+.1%}, макс. просадка {s['max_dd']:.1%}, худшая серия {s['worst_streak']}")
-            if s["clv"] is not None:
-                lines.append(f"  средний CLV {s['clv']:+.1%} (положительный — берём коэффициент лучше закрытия)")
-        for r in s["rows"][-5:]:
-            lines.append("  " + bet_line(r))
-    total = sum(summary(conn, cfg, m)["won"] + summary(conn, cfg, m)["lost"] for m in MODES)
+        sums = [summary(conn, c, mode) for c in strategies]
+        main = sums[0]
+        lines.append(f"\n{MODE_LABEL[mode].capitalize()}: ставок {main['bets']} (открыто {main['open']}, ✅ {main['won']}, ❌ {main['lost']}, ↩️ {main['void']})")
+        total += main["won"] + main["lost"]
+        if main["won"] + main["lost"]:
+            for s in sums:
+                label = STRATEGY_LABEL.get(s["strategy"], s["strategy"]) + ": " if len(sums) > 1 else ""
+                lines.append(f"  {label}банк {s['bank']:.0f}, прибыль {s['profit']:+.0f}, ROI {s['roi']:+.1%}, "
+                             f"просадка {s['max_dd']:.1%}, худшая серия {s['worst_streak']}")
+            if main["clv"] is not None:
+                lines.append(f"  средний CLV {main['clv']:+.1%} (положительный — берём коэффициент лучше закрытия)")
+        for r in main["rows"][-5:]:
+            lines.append("  " + bet_line(r, with_stake=len(sums) == 1))
     lines.append(f"\nРассчитано ставок: {total} из 100 нужных для вывода о перевесе.")
     return "\n".join(lines)
 
 
 def placed_message(b: dict) -> str:
+    stakes = b.get("stakes") or {b["strategy"]: b["stake"]}
+    amount = (f"сумма {b['stake']:.0f}" if len(stakes) == 1 else
+              "суммы: " + ", ".join(f"{STRATEGY_LABEL.get(k, k)} {v:.0f}" for k, v in stakes.items()))
     return (f"📝 Бумажная ставка ({MODE_LABEL[b['mode']]}): {b['team1']} — {b['team2']}, {market_label(b['market'])}: "
-            f"{b['pick']} @ {b['price']:.2f}, наша {b['prob']:.0%}, EV {b['ev']:+.1%}, сумма {b['stake']:.0f}")
+            f"{b['pick']} @ {b['price']:.2f}, наша {b['prob']:.0%}, EV {b['ev']:+.1%}, {amount}")
 
 
 def settled_message(b: dict) -> str:
     return f"{bet_line(b)} ({b['note']})"
+
+
+def settled_messages(done: list[dict]) -> list[str]:
+    """Одно сообщение на матч и режим, даже если стратегий несколько."""
+    groups: dict[tuple, list[dict]] = {}
+    for b in done:
+        groups.setdefault((b["fixture_id"], b["mode"]), []).append(b)
+    out = []
+    for bets in groups.values():
+        if len(bets) == 1:
+            out.append(settled_message(bets[0]))
+            continue
+        b = bets[0]
+        profits = ", ".join(f"{STRATEGY_LABEL.get(x['strategy'], x['strategy'])} {x['profit']:+.0f}" for x in bets)
+        out.append(f"{bet_line(b, with_stake=False)} ({b['note']}); прибыль: {profits}")
+    return out

@@ -17,21 +17,23 @@ class Settings:
     oddspapi_base_url: str = "https://api.oddspapi.io/v4"
     oddspapi_winner_market: str = ""
     oddiwire_api_key: str = ""
-    signal_min_ev: float = 0.05
+    signal_min_ev: float = 0.03
     signal_min_prob: float = 0.0
     signal_min_odds: float = 1.0
-    signal_max_gap: float = 0.15
+    signal_max_gap: float = 0.20
     timezone: str = "Europe/Moscow"
-    sim_bank: float = 10000.0
+    sim_bank: float = 25000.0
     sim_strategy: str = "fixed"
-    sim_stake: float = 100.0
-    sim_percent: float = 0.02
-    sim_kelly: float = 0.25
+    sim_stake: float = 1250.0
+    sim_percent: float = 0.07
+    sim_kelly: float = 1.0
+    sim_strategies: tuple = ("fixed", "percent", "kelly")
 
     def sim(self):
         from .sim import SimSettings
 
-        return SimSettings(self.sim_bank, self.sim_strategy, self.sim_stake, self.sim_percent, self.sim_kelly)
+        return SimSettings(self.sim_bank, self.sim_strategy, self.sim_stake, self.sim_percent, self.sim_kelly,
+                           strategies=self.sim_strategies)
 
     def thresholds(self):
         from .analysis import Thresholds
@@ -63,16 +65,17 @@ def load_settings(env_file: str | os.PathLike | None = ".env") -> Settings:
         oddspapi_base_url=g("ODDSPAPI_BASE_URL", "https://api.oddspapi.io/v4").rstrip("/"),
         oddspapi_winner_market=g("ODDSPAPI_WINNER_MARKET", ""),
         oddiwire_api_key=g("ODDIWIRE_API_KEY", ""),
-        signal_min_ev=float(g("SIGNAL_MIN_EV", "") or 0.05),
+        signal_min_ev=float(g("SIGNAL_MIN_EV", "") or 0.03),
         signal_min_prob=float(g("SIGNAL_MIN_PROB", "") or 0.0),
         signal_min_odds=float(g("SIGNAL_MIN_ODDS", "") or 1.0),
-        signal_max_gap=float(g("SIGNAL_MAX_GAP", "") or 0.15),
+        signal_max_gap=float(g("SIGNAL_MAX_GAP", "") or 0.20),
         timezone=g("TIMEZONE", "") or "Europe/Moscow",
-        sim_bank=float(g("SIM_BANK", "") or 10000),
+        sim_bank=float(g("SIM_BANK", "") or 25000),
         sim_strategy=(g("SIM_STRATEGY", "") or "fixed").lower(),
-        sim_stake=float(g("SIM_STAKE", "") or 100),
-        sim_percent=float(g("SIM_PERCENT", "") or 0.02),
-        sim_kelly=float(g("SIM_KELLY", "") or 0.25),
+        sim_stake=float(g("SIM_STAKE", "") or 1250),
+        sim_percent=float(g("SIM_PERCENT", "") or 0.07),
+        sim_kelly=float(g("SIM_KELLY", "") or 1.0),
+        sim_strategies=tuple(x.strip().lower() for x in (g("SIM_STRATEGIES", "") or "fixed,percent,kelly").split(",") if x.strip()),
         telegram_bot_token=g("TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_ids=_ids(g("TELEGRAM_ALLOWED_IDS", "")),
         telegram_proxy=g("TELEGRAM_PROXY", ""),
