@@ -250,7 +250,11 @@ class Bot:
             lines.append("  Веса драфта: " + ", ".join(f"{n} {w:+.2f}" for n, w in zip(DRAFT_LABELS, r.draft_weights)))
         else:
             lines.append("Модели драфта пока нет: нужны составы с героями (bk sync-matches).")
-        lines.append(f"Elo: K={r.k:.0f}, полураспад {r.half_life:.0f} дн. Веса: " + ", ".join(f"{LABELS[f]} {w:+.2f}" for f, w in zip(FEATURES, r.weights)))
+        lines.append(f"Elo: K={r.k:.0f}, полураспад {r.half_life:.0f} дн. Веса: " + ", ".join(
+            f"{LABELS[f]} {w:+.2f}" for f, w in zip(FEATURES, r.weights) if f in (r.selected or FEATURES)))
+        dropped = [LABELS[f] for f in FEATURES if r.selected and f not in r.selected]
+        if dropped:
+            lines.append("Отброшены (не улучшали прогноз на обучающих картах): " + ", ".join(dropped))
         return "\n".join(lines)
 
     def settings(self) -> str:

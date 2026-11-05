@@ -236,6 +236,50 @@ class Report:
     draft_base_eval: Evaluation = field(default_factory=Evaluation)  # модель без драфта на тех же картах
     draft_eval: Evaluation = field(default_factory=Evaluation)
     draft_weights: list[float] = field(default_factory=list)
+    selected: list[str] = field(default_factory=list)  # признаки, прошедшие отбор
+
+
+def fit_masked(samples, mask: list[bool], l2: float = 1.0) -> list[float]:
+    """Логистическая регрессия только на отмеченных признаках; у остальных вес 0."""
+    idx = [i for i, m in enumerate(mask) if m]
+    rows = [(t, [x[i] for i in idx], y, p) for t, x, y, p in samples]
+    sub = fit_logistic(*_augment(rows), l2=l2)
+    w = [0.0] * len(mask)
+    for i, wi in zip(idx, sub):
+        w[i] = wi
+    return w
+
+
+def _loss(samples, w) -> float:
+    return evaluate([(_sigmoid(sum(wi * xi for wi, xi in zip(w, x))), y) for _, x, y, _ in samples]).log_loss
+
+
+def select_features(samples, min_gain: float = 0.0005) -> list[bool]:
+    """Жадный отбор признаков по времени: учим на первых 75% карт, проверяем на последних 25%.
+
+    Рейтинг Elo входит всегда; признак добавляется, только если заметно снижает log-loss.
+    Иначе признаки, повторяющие рейтинг, мешают ему (так было на реальных данных).
+    """
+    k = len(samples[0][1]) if samples else len(FEATURES)
+    mask = [i == 0 for i in range(k)]
+    if len(samples) < 400:
+        return mask
+    cut = int(len(samples) * 0.75)
+    inner_train, inner_val = samples[:cut], samples[cut:]
+    best = _loss(inner_val, fit_masked(inner_train, mask))
+    while True:
+        trial = None
+        for i in range(1, k):
+            if mask[i]:
+                continue
+            m = mask.copy()
+            m[i] = True
+            loss = _loss(inner_val, fit_masked(inner_train, m))
+            if trial is None or loss < trial[0]:
+                trial = (loss, m)
+        if trial is None or best - trial[0] < min_gain:
+            return mask
+        best, mask = trial
 
 
 def _walk(maps, elo_params: dict, min_games: int, collect_since: int | None = None, patches=None):
@@ -294,12 +338,15 @@ def train(maps, eval_since: int, min_games: int = 5,
     elo_ev, params, samples, dsamples = best
     train_s = [s for s in samples if s[0] < eval_since]
     val_s = [s for s in samples if s[0] >= eval_since]
-    w = fit_logistic(*_augment(train_s)) if train_s else [math.log(10)] + [0.0] * (len(FEATURES) - 1)
+    # отбор признаков только на обучающих картах — проверочные 180 дней в нём не участвуют
+    mask = select_features(sorted(train_s, key=lambda r: r[0])) if train_s else [i == 0 for i in range(len(FEATURES))]
+    w = fit_masked(train_s, mask) if train_s else [math.log(10)] + [0.0] * (len(FEATURES) - 1)
     model_ev = evaluate([(_sigmoid(sum(wi * xi for wi, xi in zip(w, x))), y) for _, x, y, _ in val_s])
     # рабочая модель: веса на всех картах, состояние — на сегодня
-    final_w = fit_logistic(*_augment(samples)) if samples else w
+    final_w = fit_masked(samples, mask) if samples else w
     state, _, _ = _walk(maps, params, min_games, collect_since=10**12, patches=patches)
-    report = Report(elo_ev, model_ev, final_w, params["k"], params["half_life_days"], len(train_s))
+    report = Report(elo_ev, model_ev, final_w, params["k"], params["half_life_days"], len(train_s),
+                    selected=[f for f, m in zip(FEATURES, mask) if m])
 
     # модель после драфта: базовый логит + сила героев + опыт игроков на героях
     def drows(rows, weights):

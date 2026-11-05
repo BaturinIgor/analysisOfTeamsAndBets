@@ -122,3 +122,19 @@ def test_sync_players_batches(tmp_path):
     assert details.sync_patches(conn, od) == 2
     idx = details.PatchIndex.load(conn)
     assert idx.at(details._parse_date("2025-01-01T00:00:00Z")) == "7.37"
+
+
+def test_select_features_keeps_useful_and_drops_collinear():
+    import random
+
+    from bkanalyzer import model as mm
+
+    random.seed(1)
+    rows = []
+    for t in range(3000):
+        x = [random.gauss(0, 0.3)] + [random.gauss(0, 1) for _ in range(7)]
+        x[1] = x[0] * 2 + random.gauss(0, 0.3)  # дублирует рейтинг
+        p = mm._sigmoid(2 * x[0] + 0.5 * x[3])
+        rows.append((t, x, int(random.random() < p), 0))
+    mask = mm.select_features(rows)
+    assert mask[0] and mask[3] and not mask[1]
