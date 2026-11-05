@@ -42,3 +42,16 @@ class OpenDota:
     def hero_stats(self) -> list[dict]:
         """Статистика героев: pro_pick/pro_win и по рангам (8_pick/8_win = Immortal)."""
         return self._get("/heroStats")
+
+    def explorer(self, sql: str) -> list[dict]:
+        """SQL к базе OpenDota (один запрос вместо сотен /matches). Возвращает строки."""
+        data = self._get("/explorer", sql=sql)
+        if isinstance(data, dict) and data.get("err"):
+            from ..http import SourceError
+
+            raise SourceError(f"OpenDota explorer: {data['err']}")
+        return (data or {}).get("rows") or []
+
+    def patches(self) -> list[dict]:
+        """Список патчей с датами выхода: [{"name": "7.37", "date": "..."}]."""
+        return self._get("/constants/patch")

@@ -150,6 +150,10 @@ def simulate_step(s: Settings, conn, models, od=None, last_sync: list | None = N
     if od is not None and last_sync is not None and time.monotonic() - last_sync[0] > 3600:
         try:
             added = history.sync_pro_maps(conn, od, 730, log=lambda *_: None)
+            from . import details
+
+            details.sync_patches(conn, od)
+            details.sync_players(conn, od, max_batches=3, log=lambda *_: None)
             last_sync[0] = time.monotonic()
             if added:
                 log(f"  новых карт из OpenDota: {added}")
@@ -514,6 +518,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_sm = sub.add_parser("sync-matches", help="загрузить историю про-карт из OpenDota")
     p_sm.add_argument("--days", type=int, default=730)
+    p_sm.add_argument("--no-details", action="store_true", help="не загружать составы и патчи")
 
     p_re = sub.add_parser("rating-eval", help="проверить рейтинг на истории и показать топ команд")
     p_re.add_argument("--eval-days", type=int, default=180, help="за сколько последних дней оценивать прогнозы")
@@ -583,6 +588,12 @@ def main(argv: list[str] | None = None) -> int:
         od = OpenDota(make_client(s.user_agent), s.opendota_api_key)
         print(f"Лиг: {history.sync_leagues(conn, od)}")
         print(f"Новых карт: {history.sync_pro_maps(conn, od, args.days)}")
+        if not args.no_details:
+            from . import details
+
+            print(f"Патчей: {details.sync_patches(conn, od)}")
+            print("Составы Tier 1–2 (пакетами по 400 карт):")
+            print(f"Карт с составом добавлено: {details.sync_players(conn, od)}")
         return 0
 
     if args.cmd == "rating-eval":

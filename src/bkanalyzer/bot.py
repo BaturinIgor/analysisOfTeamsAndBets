@@ -31,7 +31,7 @@ HELP = """Анализатор ставок Dota 2
 /settings — текущие пороги
 
 Коэффициенты: линия Oddin (на ней работает BetBoom), обновляется автоматически.
-Вероятности: рейтинг Elo + форма + личные встречи по картам Tier 1–2, обучено на истории. Патч, состав и драфт пока не учитываются."""
+Вероятности: рейтинг Elo + форма + личные встречи + патч + стабильность состава по картам Tier 1–2, обучено на истории. Драфт пока не учитывается."""
 
 LATER = "Выгрузка в xlsx появится на следующем шаге."
 
@@ -50,14 +50,24 @@ class ModelCache:
 
         history.ensure_schema(conn)
         conn.row_factory = None
-        key = conn.execute("SELECT COUNT(*), MAX(match_id) FROM pro_maps").fetchone()
+        from . import details
+
+        details.ensure_schema(conn)
+        key = conn.execute("SELECT (SELECT COUNT(*) FROM pro_maps), (SELECT MAX(match_id) FROM pro_maps), "
+                           "(SELECT COUNT(*) FROM map_players), (SELECT COUNT(*) FROM patches)").fetchone()
         if key != self._key or self._model is None:
+            from . import details
+
             maps = [dict(r) for r in history.tier_maps(conn)]
             conn.row_factory = None
+            lineups = details.lineups(conn)
+            for m in maps:
+                m["lineup_r"], m["lineup_d"] = lineups.get(m["match_id"], (None, None))
+            patches = details.PatchIndex.load(conn)
             since = (maps[-1]["start_time"] - self.eval_days * 86400) if maps else 0
-            self._model, self.report = mm.train(maps, since)
+            self._model, self.report = mm.train(maps, since, patches=patches if patches.names else None)
             self._key = key
-        return self._model, key[0] or 0
+        return self._model, key[0] or 0  # число карт в базе
 
 
 def _local(ts: str | None, tz: ZoneInfo) -> str:
@@ -170,7 +180,7 @@ class Bot:
                 lines.append(f"⚠️ — модель расходится с рынком больше чем на {self.thresholds.max_gap:.0%}: скорее ошибается модель, ставки нет.")
             if not any(self.thresholds.ok(p) for p in a.picks):
                 lines.append("Ставки нет: перевес ниже порога.")
-        lines.append("\nРиски: модель видит результаты карт, форму и личные встречи; патч, замены и драфт пока не учитываются.")
+        lines.append("\nРиски: модель видит результаты карт, форму, личные встречи, патч и стабильность состава; драфт пока не учитывается.")
         return "\n".join(lines)
 
     def value(self) -> str:
