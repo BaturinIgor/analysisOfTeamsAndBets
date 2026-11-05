@@ -128,3 +128,20 @@ def test_sync_does_not_stop_on_undated_series(tmp_path):
     pages[0] = [{"id": 1, "status": "canceled", "begin_at": None, "opponents": []}] + pages[0]
     ps = FakePS(pages)
     assert cs.sync(conn, ps, 365, now=NOW.timestamp(), sleep=lambda *_: None, log=lambda *_: None) == 80
+
+
+def test_series_date_fallback_and_query():
+    m = ps_match(5, None, VIT, FAZE, 2, 1)
+    m["scheduled_at"] = "2026-10-20T10:00:00Z"
+    assert len(cs.series_maps(m)) == 3
+    import httpx
+    from bkanalyzer.sources.pandascore import PandaScore
+
+    seen = {}
+
+    def handler(req):
+        seen.update(dict(req.url.params))
+        return httpx.Response(200, json=[])
+
+    PandaScore(httpx.Client(transport=httpx.MockTransport(handler)), "t").cs_past()
+    assert seen["filter[status]"] == "finished" and seen["sort"] == "-scheduled_at"

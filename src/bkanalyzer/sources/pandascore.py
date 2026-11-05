@@ -27,5 +27,7 @@ class PandaScore:
 
     def cs_past(self, page: int = 1, per_page: int = 100) -> list[dict]:
         """Сыгранные серии CS2, от новых к старым."""
-        data = self._get("/csgo/matches/past", sort="-begin_at", page=page, per_page=per_page)
+        # по begin_at нельзя: у отменённых и части сыгранных он пустой, и при сортировке они идут первыми
+        data = self._get("/csgo/matches/past", **{"filter[status]": "finished", "sort": "-scheduled_at",
+                                                    "page": page, "per_page": per_page})
         return data if isinstance(data, list) else []

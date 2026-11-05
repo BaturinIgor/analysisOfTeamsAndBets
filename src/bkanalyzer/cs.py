@@ -48,6 +48,11 @@ def _ts(iso: str | None) -> int | None:
         return None
 
 
+def _date(m: dict) -> str | None:
+    """Когда сыграна серия: begin_at бывает пустым даже у сыгранных — берём запасные поля."""
+    return m.get("begin_at") or m.get("scheduled_at") or m.get("original_scheduled_at") or m.get("end_at")
+
+
 def series_maps(m: dict) -> list[tuple]:
     """Строки cs_maps из одной серии PandaScore; пусто — если серия не сыграна (неявка, нет счёта)."""
     if m.get("status") not in (None, "finished") or m.get("forfeit"):
@@ -58,7 +63,7 @@ def series_maps(m: dict) -> list[tuple]:
     score = {r.get("team_id"): r.get("score") or 0 for r in m.get("results") or []}
     a, b = opps
     wa, wb = int(score.get(a["id"], 0)), int(score.get(b["id"], 0))
-    start = _ts(m.get("begin_at") or m.get("scheduled_at"))
+    start = _ts(_date(m))
     if not start or wa + wb == 0 or wa + wb > 7:
         return []
     tour = m.get("tournament") or {}
@@ -86,8 +91,8 @@ def sync(conn: sqlite3.Connection, ps, days: int = 365, *, now: float | None = N
     """Загружает сыгранные серии CS2 за days дней (от новых к старым), пока не дойдёт до уже загруженных."""
     ensure_schema(conn)
     since = (now or time.time()) - days * 86400
-    # v2: метка первой версии могла записаться после обрыва на первой странице — её не учитываем
-    row = conn.execute("SELECT value FROM cs_sync WHERE key='backfilled_since_v2'").fetchone()
+    # v3: метки прошлых версий писались при неверной сортировке запроса — их не учитываем
+    row = conn.execute("SELECT value FROM cs_sync WHERE key='backfilled_since_v3'").fetchone()
     covered = row is not None and row[0] <= since
     saved = seen = kept = 0
     complete = False
@@ -105,7 +110,7 @@ def sync(conn: sqlite3.Connection, ps, days: int = 365, *, now: float | None = N
         added = conn.total_changes - before
         saved += added
         # у отменённых серий даты может не быть — по ним границу окна не определяем
-        stamps = [t for t in (_ts(m.get("begin_at") or m.get("scheduled_at")) for m in items) if t]
+        stamps = [t for t in (_ts(_date(m)) for m in items) if t]
         if stamps and min(stamps) < since:
             complete = True
             break
@@ -115,7 +120,7 @@ def sync(conn: sqlite3.Connection, ps, days: int = 365, *, now: float | None = N
             log(f"  CS2: страниц {page}, серий {seen} (сыграно {kept}), новых карт {saved}")
         sleep(pause)
     if complete and not covered:
-        conn.execute("INSERT OR REPLACE INTO cs_sync VALUES ('backfilled_since_v2', ?)", (int(since),))
+        conn.execute("INSERT OR REPLACE INTO cs_sync VALUES ('backfilled_since_v3', ?)", (int(since),))
         conn.commit()
     log(f"  CS2: страниц {page if items else page - 1}, серий {seen}, из них сыграно со счётом {kept}")
     return saved
