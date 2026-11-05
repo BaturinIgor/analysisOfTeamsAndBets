@@ -40,7 +40,7 @@ def match_rows(analyses: list[Analysis], t: Thresholds, tz: ZoneInfo) -> list[tu
         for p in a.picks:
             flags = []
             if t.suspicious(p):
-                flags.append(f"расхождение с рынком > {t.max_gap:.0%}")
+                flags.append(t.reason(p))
             if p.ev >= t.min_ev and not t.ok(p) and not flags:
                 flags.append("не прошёл фильтр вероятности/коэффициента")
             signal = t.ok(p)

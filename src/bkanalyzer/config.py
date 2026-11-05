@@ -20,7 +20,8 @@ class Settings:
     signal_min_ev: float = 0.03
     signal_min_prob: float = 0.0
     signal_min_odds: float = 1.0
-    signal_max_gap: float = 0.20
+    signal_max_gap: float = 0.10
+    signal_min_games: int = 30
     timezone: str = "Europe/Moscow"
     sim_bank: float = 25000.0
     sim_strategy: str = "fixed"
@@ -38,7 +39,7 @@ class Settings:
     def thresholds(self):
         from .analysis import Thresholds
 
-        return Thresholds(self.signal_min_ev, self.signal_min_prob, self.signal_min_odds, self.signal_max_gap)
+        return Thresholds(self.signal_min_ev, self.signal_min_prob, self.signal_min_odds, self.signal_max_gap, self.signal_min_games)
     telegram_bot_token: str = ""
     telegram_allowed_ids: tuple[int, ...] = field(default_factory=tuple)
     telegram_proxy: str = ""
@@ -68,7 +69,8 @@ def load_settings(env_file: str | os.PathLike | None = ".env") -> Settings:
         signal_min_ev=float(g("SIGNAL_MIN_EV", "") or 0.03),
         signal_min_prob=float(g("SIGNAL_MIN_PROB", "") or 0.0),
         signal_min_odds=float(g("SIGNAL_MIN_ODDS", "") or 1.0),
-        signal_max_gap=float(g("SIGNAL_MAX_GAP", "") or 0.20),
+        signal_max_gap=float(g("SIGNAL_MAX_GAP", "") or 0.10),
+        signal_min_games=int(g("SIGNAL_MIN_GAMES", "") or 30),
         timezone=g("TIMEZONE", "") or "Europe/Moscow",
         sim_bank=float(g("SIM_BANK", "") or 25000),
         sim_strategy=(g("SIM_STRATEGY", "") or "fixed").lower(),

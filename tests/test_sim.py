@@ -154,3 +154,15 @@ def test_longshots_recorded_quietly(conn):
     text = sim.report(conn, CFG)
     assert "Аутсайдеры (на заметку): записей 1, рассчитано 1" in text and "выиграли 100%" in text
     assert "Рассчитано ставок: 0 из 100" in text  # в зачёт 100 ставок не идут
+
+
+def test_low_history_pick_is_suspicious():
+    from bkanalyzer.analysis import Pick, Thresholds
+    t = Thresholds(min_ev=0.03, max_gap=0.10, min_games=30)
+    p = Pick("match", "A", 2.9, 0.48, 0.45, 10)
+    assert t.suspicious(p) and not t.ok(p)
+    assert "мало истории" in t.reason(p)
+    big_gap = Pick("match", "A", 2.9, 0.48, 0.32, 200)
+    assert "расходится" in t.reason(big_gap)
+    good = Pick("match", "A", 2.2, 0.50, 0.44, 200)
+    assert t.reason(good) is None and t.ok(good)

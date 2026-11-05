@@ -283,8 +283,9 @@ class Bot:
             for p in sorted(a.picks, key=lambda p: -p.ev):
                 flag = "✅" if self.thresholds.ok(p) else "⚠️" if self.thresholds.suspicious(p) and p.ev > 0 else "  "
                 lines.append(f"{flag} {market_label(p.market)}: {p.team} @ {p.price:.2f} — наша {p.prob:.0%}, EV {p.ev:+.1%}")
-            if any(self.thresholds.suspicious(p) and p.ev > 0 for p in a.picks):
-                lines.append(f"⚠️ — модель расходится с рынком больше чем на {self.thresholds.max_gap:.0%}: скорее ошибается модель, ставки нет.")
+            reasons = {self.thresholds.reason(p) for p in a.picks if p.ev > 0} - {None}
+            for r in sorted(reasons):
+                lines.append(f"⚠️ — {r}: скорее ошибается модель, ставки нет.")
             if not any(self.thresholds.ok(p) for p in a.picks):
                 lines.append("Ставки нет: перевес ниже порога.")
         risk = self.risks(m, int(self._now().timestamp()))
@@ -355,7 +356,7 @@ class Bot:
         return (f"Пороги сигнала: EV ≥ {t.min_ev:.0%}, вероятность ≥ {t.min_prob:.0%}, коэффициент ≥ {t.min_odds:.2f}, "
                 f"расхождение с рынком ≤ {t.max_gap:.0%}.\n"
                 f"Симулятор: банк {c.bank:.0f} у каждой стратегии, стратегии: {c.describe()}; не больше {c.max_stake_share:.0%} банка в ставке.\n"
-                "Меняются в .env: SIGNAL_MIN_EV, SIGNAL_MIN_PROB, SIGNAL_MIN_ODDS, SIGNAL_MAX_GAP, SIM_BANK, SIM_STRATEGIES, SIM_STAKE, SIM_PERCENT, SIM_KELLY.")
+                "Меняются в .env: SIGNAL_MIN_EV, SIGNAL_MIN_PROB, SIGNAL_MIN_ODDS, SIGNAL_MAX_GAP, SIGNAL_MIN_GAMES, SIM_BANK, SIM_STRATEGIES, SIM_STAKE, SIM_PERCENT, SIM_KELLY.")
 
     def export(self) -> Reply:
         from . import export as ex
