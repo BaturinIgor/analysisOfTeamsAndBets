@@ -113,3 +113,31 @@ def test_sim_reset(tmp_path, monkeypatch):
     assert main(["sim-reset"]) == 1
     assert main(["sim-reset", "--yes"]) == 0
     assert c.execute("SELECT COUNT(*) FROM paper_bets").fetchone()[0] == 0
+
+
+def test_parallel_strategies_and_migration(conn):
+    # старая схема с UNIQUE (fixture_id, mode) переносится без потери ставок
+    conn.execute("DROP TABLE IF EXISTS paper_bets")
+    conn.executescript(sim.SCHEMA.replace("UNIQUE (fixture_id, mode, strategy)", "UNIQUE (fixture_id, mode)"))
+    conn.execute("INSERT INTO paper_bets (created_at, mode, fixture_id, market, pick, price, prob, stake, bank_before, strategy) "
+                 "VALUES ('2026-11-01T00:00:00+00:00', 'prematch', 'old', 'match_winner', 'X', 2.0, 0.6, 10, 1000, 'fixed')")
+    conn.commit()
+    sim.ensure_schema(conn)
+    assert conn.execute("SELECT COUNT(*) FROM paper_bets").fetchone()[0] == 1
+
+    cfg = sim.SimSettings(bank=25000, stake=1250, percent=0.07, kelly=1.0, strategies=("fixed", "percent", "kelly"))
+    placed = sim.place_bets(conn, analyses(conn), Thresholds(0.05), cfg, now=NOW)
+    assert len(placed) == 1 and set(placed[0]["stakes"]) == {"fixed", "percent", "kelly"}
+    assert placed[0]["stakes"]["fixed"] == 1250 and placed[0]["stakes"]["percent"] == 1750
+    assert "фикс. сумма 1250" in sim.placed_message(placed[0])
+    rows = conn.execute("SELECT strategy, stake FROM paper_bets WHERE fixture_id='e1'").fetchall()
+    assert len(rows) == 3
+    assert sim.bank(conn, "prematch", sim.replace(cfg, strategy="percent")) == 25000 - 1750
+    report = sim.report(conn, cfg)
+    assert "фикс. 1250, 7% банка, Келли ×1" in report
+
+    done = [{"fixture_id": "e1", "mode": "prematch", "strategy": st, "profit": p, "status": "won", "note": "2:0",
+             "team1": "Spirit", "team2": "Tundra", "market": "match_winner", "pick": "Spirit", "price": 1.9, "stake": 1}
+            for st, p in (("fixed", 1125), ("percent", 1575), ("kelly", 900))]
+    msgs = sim.settled_messages(done)
+    assert len(msgs) == 1 and "Келли +900" in msgs[0]

@@ -56,7 +56,7 @@ MATCH_HEAD = ["Начало", "Фаза", "Счёт", "Команда 1", "Ко�
 BET_HEAD = ["№", "Поставлена", "Режим", "Начало", "Команда 1", "Команда 2", "Рынок", "Ставка на", "Коэф.",
             "Наша вероятность", "Вероятность рынка", "EV", "Сумма", "Банк до", "Стратегия", "Статус",
             "Прибыль", "Закрытие", "CLV", "Рассчитана", "Комментарий"]
-SUMMARY_HEAD = ["Режим", "Ставок", "Открыто", "Выигрыш", "Проигрыш", "Возврат", "Поставлено", "Прибыль",
+SUMMARY_HEAD = ["Режим", "Стратегия", "Ставок", "Открыто", "Выигрыш", "Проигрыш", "Возврат", "Поставлено", "Прибыль",
                 "ROI", "Банк", "Макс. просадка", "Худшая серия", "Средний CLV"]
 
 
@@ -81,12 +81,13 @@ def bet_rows(conn: sqlite3.Connection, tz: ZoneInfo) -> list[tuple[list, str | N
 def summary_rows(conn: sqlite3.Connection, cfg: simmod.SimSettings) -> list[tuple[list, str | None]]:
     out = []
     for mode in simmod.MODES:
-        s = simmod.summary(conn, cfg, mode)
-        values = [simmod.MODE_LABEL[mode], s["bets"], s["open"], s["won"], s["lost"], s["void"], round(s["staked"], 2),
-                  round(s["profit"], 2), round(s["roi"], 4) if s["roi"] is not None else None, round(s["bank"], 2),
-                  round(s["max_dd"], 4), s["worst_streak"], round(s["clv"], 4) if s["clv"] is not None else None]
-        color = None if not (s["won"] + s["lost"]) else GREEN if s["profit"] > 0 else RED if s["profit"] < 0 else None
-        out.append((values, color))
+        for c in cfg.all():
+            s = simmod.summary(conn, c, mode)
+            values = [simmod.MODE_LABEL[mode], simmod.STRATEGY_LABEL.get(c.strategy, c.strategy), s["bets"], s["open"], s["won"], s["lost"], s["void"], round(s["staked"], 2),
+                      round(s["profit"], 2), round(s["roi"], 4) if s["roi"] is not None else None, round(s["bank"], 2),
+                      round(s["max_dd"], 4), s["worst_streak"], round(s["clv"], 4) if s["clv"] is not None else None]
+            color = None if not (s["won"] + s["lost"]) else GREEN if s["profit"] > 0 else RED if s["profit"] < 0 else None
+            out.append((values, color))
     return out
 
 

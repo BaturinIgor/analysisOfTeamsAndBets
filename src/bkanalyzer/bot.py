@@ -347,8 +347,8 @@ class Bot:
         c = self.sim
         return (f"Пороги сигнала: EV ≥ {t.min_ev:.0%}, вероятность ≥ {t.min_prob:.0%}, коэффициент ≥ {t.min_odds:.2f}, "
                 f"расхождение с рынком ≤ {t.max_gap:.0%}.\n"
-                f"Симулятор: банк {c.bank:.0f}, стратегия {c.strategy} (сумма {c.stake:.0f} / {c.percent:.0%} банка / {c.kelly:.2f} Келли).\n"
-                "Меняются в .env: SIGNAL_MIN_EV, SIGNAL_MIN_PROB, SIGNAL_MIN_ODDS, SIGNAL_MAX_GAP, SIM_BANK, SIM_STRATEGY, SIM_STAKE, SIM_PERCENT, SIM_KELLY.")
+                f"Симулятор: банк {c.bank:.0f} у каждой стратегии, стратегии: {c.describe()}; не больше {c.max_stake_share:.0%} банка в ставке.\n"
+                "Меняются в .env: SIGNAL_MIN_EV, SIGNAL_MIN_PROB, SIGNAL_MIN_ODDS, SIGNAL_MAX_GAP, SIM_BANK, SIM_STRATEGIES, SIM_STAKE, SIM_PERCENT, SIM_KELLY.")
 
     def export(self) -> Reply:
         from . import export as ex
