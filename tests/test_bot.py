@@ -207,3 +207,42 @@ def test_outbox_keeps_messages_until_telegram_is_back():
     state["down"] = False
     assert box.flush() == 2 and not box.pending
     assert "ставка 1" in state["sent"][0].decode() and "ставка 2" in state["sent"][1].decode()
+
+
+def test_buttons_menu_and_callbacks(bot):
+    from bkanalyzer.bot import Reply, reply_markup
+
+    start = bot.handle(ME, "/start")
+    assert isinstance(start, Reply) and reply_markup(start)["keyboard"][0][0]["text"] == "📋 Матчи"
+    today = bot.handle(ME, "📋 Матчи")  # кнопка меню = /today
+    assert "Матчи Dota в линии" in today
+    kb = reply_markup(today)["inline_keyboard"]
+    data = {b["callback_data"] for row in kb for b in row}
+    assert {"m:e1", "n:e1", "m:e2"} <= data
+    m = bot.callback(ME, "m:e1")
+    assert "Spirit — Tundra" in m and reply_markup(m)["inline_keyboard"][0][0]["callback_data"] == "n:e1"
+    assert bot.callback(12345, "m:e1") is None  # чужим не отвечаем
+    assert "Spirit — Tundra" in bot.handle(ME, "spirit")  # просто текст — матч команды
+    assert "рейтинг" in bot.handle(ME, "Tundra Esports") or "Spirit — Tundra" in bot.handle(ME, "Tundra Esports")
+
+
+def test_polling_answers_callback(bot):
+    sent, polls = [], []
+
+    def handler(req):
+        path = req.url.path.rsplit("/", 1)[-1]
+        if path == "getUpdates":
+            polls.append(1)
+            if len(polls) == 1:
+                return httpx.Response(200, json={"ok": True, "result": [{"update_id": 5, "callback_query": {
+                    "id": "q1", "from": {"id": ME}, "data": "m:e1", "message": {"chat": {"id": ME}}}}]})
+            return httpx.Response(200, json={"ok": True, "result": []})
+        sent.append((path, req.content.decode()))
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    run_polling("T", bot, client, log=lambda *_: None, stop=lambda: len(polls) >= 2, sleep=lambda *_: None)
+    kinds = [x[0] for x in sent]
+    assert "answerCallbackQuery" in kinds and "sendMessage" in kinds
+    msg = next(body for k, body in sent if k == "sendMessage")
+    assert "inline_keyboard" in msg

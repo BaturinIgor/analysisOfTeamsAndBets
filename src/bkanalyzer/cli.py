@@ -303,7 +303,12 @@ def run_bot(s: Settings, collect: bool = True, interval: int = 600) -> int:
               export_dir=Path(s.db_path).parent / "exports", news_client=make_client(s.user_agent))
     status = check_telegram(s.telegram_bot_token, tg)
     print(f"Telegram{' через прокси' if s.telegram_proxy else ''}: {status}")
-    print("Бот запущен. Напишите ему /today в Telegram. Остановить: Ctrl+C")
+    print("Бот запущен. Откройте его в Telegram — кнопки внизу экрана. Остановить: Ctrl+C")
+    if status.startswith("ok"):
+        from .bot import Reply, send_reply
+
+        for chat in s.telegram_allowed_ids:  # присылаем меню, чтобы кнопки появились сразу
+            send_reply(tg, s.telegram_bot_token, chat, Reply("🟢 Бот запущен. Кнопки — внизу экрана.", menu=True), log=print)
     try:
         run_polling(s.telegram_bot_token, bot, tg, outbox=outbox)
     except KeyboardInterrupt:
