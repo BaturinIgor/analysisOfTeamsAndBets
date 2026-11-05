@@ -171,7 +171,12 @@ def simulate_step(s: Settings, conn, models, od=None, last_sync: list | None = N
         log("  " + sim.placed_message(b))
         if notify:
             notify(sim.placed_message(b))
-    for text in sim.settled_messages(sim.settle(conn)):
+    for b in sim.place_longshots(conn, analyses, s.thresholds(), cfg):
+        log("  на заметку: " + sim.placed_message(b))
+    done = sim.settle(conn)
+    for text in sim.settled_messages([b for b in done if b["mode"] in sim.QUIET_MODES]):
+        log("  на заметку: " + text)
+    for text in sim.settled_messages([b for b in done if b["mode"] not in sim.QUIET_MODES]):
         log("  " + text)
         if notify:
             notify(text)

@@ -141,3 +141,16 @@ def test_parallel_strategies_and_migration(conn):
             for st, p in (("fixed", 1125), ("percent", 1575), ("kelly", 900))]
     msgs = sim.settled_messages(done)
     assert len(msgs) == 1 and "Келли +900" in msgs[0]
+
+
+def test_longshots_recorded_quietly(conn):
+    t = Thresholds(min_ev=0.05, max_gap=0.01)  # любой пик — «подозрительный»
+    assert sim.place_bets(conn, analyses(conn), t, CFG, now=NOW) == []  # основную ставку не делаем
+    noted = sim.place_longshots(conn, analyses(conn), t, sim.replace(CFG, strategies=("fixed", "kelly")), now=NOW)
+    assert noted and all(b["mode"] == "longshot" for b in noted)
+    assert set(noted[0]["stakes"]) == {"fixed"}  # на заметку — только фиксированной суммой
+    conn.execute("UPDATE paper_bets SET status='won', profit=stake*(price-1)")
+    conn.commit()
+    text = sim.report(conn, CFG)
+    assert "Аутсайдеры (на заметку): записей 1, рассчитано 1" in text and "выиграли 100%" in text
+    assert "Рассчитано ставок: 0 из 100" in text  # в зачёт 100 ставок не идут

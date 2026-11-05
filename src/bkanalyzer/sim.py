@@ -42,8 +42,12 @@ CREATE TABLE IF NOT EXISTS paper_bets (
 );
 """
 
-MODES = ("prematch", "draft", "live")
-MODE_LABEL = {"prematch": "до матча", "draft": "после драфта", "live": "в эфире"}
+MODES = ("prematch", "draft", "live", "longshot")
+MODE_LABEL = {"prematch": "до матча", "draft": "после драфта", "live": "в эфире",
+              "longshot": "аутсайдеры (на заметку)"}
+# «аутсайдеры»: модель расходится с рынком сильнее SIGNAL_MAX_GAP. Такие ставки не делаем,
+# а записываем на заметку фиксированной суммой без уведомлений — чтобы проверить, кто прав.
+QUIET_MODES = ("longshot",)
 
 
 STRATEGY_LABEL = {"fixed": "фикс. сумма", "percent": "% банка", "kelly": "Келли"}
@@ -136,6 +140,24 @@ def place_bets(conn: sqlite3.Connection, analyses: list[Analysis], thresholds: T
         picks = [p for p in a.picks if thresholds.ok(p)]
         if picks:
             b = place_pick(conn, a, max(picks, key=lambda p: p.ev), mode, cfg, now)
+            if b:
+                placed.append(b)
+    return placed
+
+
+def strategies_for(cfg: SimSettings, mode: str) -> list[SimSettings]:
+    return [replace(cfg, strategy="fixed", strategies=())] if mode in QUIET_MODES else cfg.all()
+
+
+def place_longshots(conn: sqlite3.Connection, analyses: list[Analysis], thresholds: Thresholds, cfg: SimSettings,
+                    now: datetime | None = None) -> list[dict]:
+    """Записывает на заметку пики с перевесом, отсечённые фильтром расхождения с рынком."""
+    placed = []
+    fixed = replace(cfg, strategy="fixed", strategies=())
+    for a in analyses:
+        picks = [p for p in a.picks if thresholds.suspicious(p) and p.ev >= thresholds.min_ev]
+        if picks:
+            b = place_pick(conn, a, max(picks, key=lambda p: p.ev), "longshot", fixed, now)
             if b:
                 placed.append(b)
     return placed
@@ -306,8 +328,21 @@ def report(conn: sqlite3.Connection, cfg: SimSettings) -> str:
     lines = [f"Симулятор: старт {cfg.bank:.0f} у каждой стратегии; {cfg.describe()}"]
     total = 0
     for mode in MODES:
-        sums = [summary(conn, c, mode) for c in strategies]
+        sums = [summary(conn, c, mode) for c in strategies_for(cfg, mode)]
         main = sums[0]
+        if mode in QUIET_MODES:
+            settled = [r for r in main["rows"] if r["status"] in ("won", "lost")]
+            if not main["bets"]:
+                continue
+            lines.append(f"\n{MODE_LABEL[mode].capitalize()}: записей {main['bets']}, рассчитано {len(settled)}")
+            if settled:
+                hit = sum(r["status"] == "won" for r in settled) / len(settled)
+                ours = sum(r["prob"] for r in settled) / len(settled)
+                book = [r["book_prob"] for r in settled if r["book_prob"] is not None]
+                book_txt = f", рынок давал {sum(book) / len(book):.0%}" if book else ""
+                lines.append(f"  выиграли {hit:.0%}; модель давала {ours:.0%}{book_txt}; "
+                             f"прибыль фикс. суммой {main['profit']:+.0f}")
+            continue
         lines.append(f"\n{MODE_LABEL[mode].capitalize()}: ставок {main['bets']} (открыто {main['open']}, ✅ {main['won']}, ❌ {main['lost']}, ↩️ {main['void']})")
         total += main["won"] + main["lost"]
         if main["won"] + main["lost"]:
