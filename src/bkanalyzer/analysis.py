@@ -220,6 +220,7 @@ class Pick:
     price: float
     prob: float
     book_prob: float | None
+    min_games: int = 10**6  # сколько карт в истории у менее опытной из двух команд
 
     @property
     def ev(self) -> float:
@@ -264,7 +265,7 @@ def analyze(bm: BoardMatch, model, now: int | None = None) -> Analysis:
     for market, team, team_prob in outcomes:
         q = bm.price(market, team)
         if q:
-            res.picks.append(Pick(market, team, q.price, team_prob, q.fair_prob))
+            res.picks.append(Pick(market, team, q.price, team_prob, q.fair_prob, min(a[1].games, b[1].games)))
     return res
 
 
@@ -274,10 +275,19 @@ class Thresholds:
     min_prob: float = 0.0
     min_odds: float = 1.0
     max_gap: float = 0.15  # насколько наша вероятность может расходиться с рынком (без маржи)
+    min_games: int = 0     # у обеих команд должно быть хотя бы столько карт в истории
+
+    def reason(self, pick: Pick) -> str | None:
+        """Почему модели здесь не стоит верить (или None)."""
+        if pick.book_prob is not None and abs(pick.prob - pick.book_prob) > self.max_gap:
+            return f"модель расходится с рынком больше чем на {self.max_gap:.0%}"
+        if pick.min_games < self.min_games:
+            return f"мало истории: у одной из команд {pick.min_games} карт (нужно {self.min_games})"
+        return None
 
     def suspicious(self, pick: Pick) -> bool:
-        """Модель слишком далеко от рынка: скорее ошибка модели, чем ошибка букмекера."""
-        return pick.book_prob is not None and abs(pick.prob - pick.book_prob) > self.max_gap
+        """Скорее ошибка модели, чем ошибка букмекера: далеко от рынка или мало данных о команде."""
+        return self.reason(pick) is not None
 
     def ok(self, pick: Pick) -> bool:
         return (pick.ev >= self.min_ev and pick.prob >= self.min_prob and pick.price >= self.min_odds

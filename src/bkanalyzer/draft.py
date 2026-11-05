@@ -92,7 +92,7 @@ def draft_pick(model, bm: BoardMatch, d: LiveDraft, team1_radiant: bool, now: in
     for team, prob in ((bm.team1, p), (bm.team2, 1 - p)):
         q = bm.price(market, team)
         if q:
-            picks.append(Pick(market, team, q.price, prob, q.fair_prob))
+            picks.append(Pick(market, team, q.price, prob, q.fair_prob, min(a[1].games, b[1].games)))
     return p, picks
 
 
