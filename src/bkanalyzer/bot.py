@@ -163,7 +163,12 @@ class Bot:
             head += f" (счёт {m.score})"
         q1, q2 = m.price("match_winner", m.team1), m.price("match_winner", m.team2)
         odds = f"{q1.price:.2f} / {q2.price:.2f}" if q1 and q2 else "нет коэффициентов"
-        ours = f"наша {_pct(a.p_series)} / {_pct(1 - a.p_series)}" if a.p_series is not None else "нашей оценки нет"
+        if a.p_series is None:
+            ours = "нашей оценки нет"
+        elif a.p_draw is not None:
+            ours = f"наша {_pct(a.p_series)} / ничья {_pct(a.p_draw)} / {_pct(a.p_series2)}"
+        else:
+            ours = f"наша {_pct(a.p_series)} / {_pct(a.p_series2)}"
         best = max(a.picks, key=lambda p: p.ev, default=None)
         sig = f" ✅ {best.team} {market_label(best.market)} EV {best.ev:+.0%}" if best and self.thresholds.ok(best) else ""
         return f"{head}\n   П1/П2 {odds}; {ours}{sig}"
@@ -252,11 +257,13 @@ class Bot:
         s1, s2 = a.known
         lines = [
             f"{m.team1} — {m.team2}",
-            f"{m.tournament or ''}, Bo{m.best_of}, начало {_local(m.start_time, self.tz)}" + (f", в эфире, счёт {m.score}" if m.phase == "live" else ""),
+            f"{m.tournament or ''}, Bo{m.best_of}{'' if m.format_known else ' (формат не известен, считаю Bo3)'}, начало {_local(m.start_time, self.tz)}" + (f", в эфире, счёт {m.score}" if m.phase == "live" else ""),
             f"Рейтинг: {_team(m.team1, s1)} vs {_team(m.team2, s2)}",
         ]
         if a.p_map is not None:
-            lines.append(f"Наша вероятность: карта {a.p_map:.0%} / {1 - a.p_map:.0%}; серия {a.p_series:.0%} / {1 - a.p_series:.0%}")
+            series = (f"2:0 {a.p_series:.0%}, ничья 1:1 {a.p_draw:.0%}, 0:2 {a.p_series2:.0%}" if a.p_draw is not None
+                      else f"{a.p_series:.0%} / {a.p_series2:.0%}")
+            lines.append(f"Наша вероятность: карта {a.p_map:.0%} / {1 - a.p_map:.0%}; серия {series}")
             if a.factors:
                 from .model import LABELS
 

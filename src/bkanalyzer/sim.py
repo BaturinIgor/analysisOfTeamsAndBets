@@ -15,7 +15,7 @@ import sqlite3
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
-from .analysis import Analysis, Thresholds, market_label, normalize
+from .analysis import Analysis, Thresholds, is_draw, market_label, normalize
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS paper_bets (
@@ -231,7 +231,7 @@ def settle_result(bet: dict, maps: list) -> tuple[str, str] | None:
             return None
         w = winner_name(maps[n - 1])
         return ("won" if is_pick(w) else "lost"), f"карту {n} выиграла {w}"
-    best_of = BEST_OF.get(maps[0]["series_type"], 3)
+    best_of = 2 if is_draw(bet["pick"]) else BEST_OF.get(maps[0]["series_type"], 3)
     need = best_of // 2 + 1
     wins = sum(1 for r in maps if is_pick(winner_name(r)))
     losses = len(maps) - wins
@@ -239,7 +239,13 @@ def settle_result(bet: dict, maps: list) -> tuple[str, str] | None:
     if best_of == 2:
         if len(maps) < 2:
             return None
-        return ("won", score) if wins == 2 else ("lost", score) if losses == 2 else ("void", f"ничья {score}")
+        if is_draw(bet["pick"]):
+            w1, w2 = winner_name(maps[0]), winner_name(maps[1])
+            return ("won", "ничья 1:1") if normalize(w1) != normalize(w2) else ("lost", f"без ничьей, {w1} 2:0")
+        if wins == losses:
+            # ничья: если букмекер давал исход «ничья» (3 исхода), ставка на команду проиграла; иначе возврат
+            return ("lost" if bet.get("draw_offered") else "void"), f"ничья {score}"
+        return ("won", score) if wins == 2 else ("lost", score)
     if wins >= need:
         return "won", score
     if losses >= need:
@@ -266,6 +272,9 @@ def settle(conn: sqlite3.Connection, now: datetime | None = None, void_after_day
     done = []
     for bet in bets:
         maps = find_series(conn, bet["team1"], bet["team2"], bet["start_time"], bet["created_at"])
+        bet["draw_offered"] = bool(conn.execute(
+            "SELECT 1 FROM odds_snapshots WHERE fixture_id=? AND market='match_winner' AND LOWER(outcome) IN ('draw','x','tie','ничья') LIMIT 1",
+            (bet["fixture_id"],)).fetchone())
         res = settle_result(bet, maps) if maps else None
         if res is None:
             created = datetime.fromisoformat(bet["created_at"])

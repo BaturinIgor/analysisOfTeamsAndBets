@@ -48,8 +48,20 @@ def match_team(model, name: str) -> tuple[int, rating.TeamState] | None:
     return max(partial, key=lambda x: x[1].games) if partial else None
 
 
+DRAW_NAMES = {"draw", "x", "tie", "ничья", "ничья (x)"}
+
+
+def is_draw(outcome: str) -> bool:
+    return (outcome or "").strip().casefold() in DRAW_NAMES
+
+
 def series_from_score(p: float, best_of: int, won: int = 0, lost: int = 0) -> float:
-    """Вероятность выиграть серию при текущем счёте по картам (карта в игре считается неначатой)."""
+    """Вероятность выиграть серию при текущем счёте по картам (карта в игре считается неначатой).
+
+    В Bo2 «выиграть серию» — это 2:0; ничья 1:1 считается отдельно (draw_from_score).
+    """
+    if best_of == 1:
+        return p if won + lost == 0 else float(won > lost)
     if best_of == 2:
         return 0.0 if lost else (p * p if won == 0 else p)
     need = best_of // 2 + 1
@@ -63,6 +75,46 @@ def series_from_score(p: float, best_of: int, won: int = 0, lost: int = 0) -> fl
         return p * f(a + 1, b) + (1 - p) * f(a, b + 1)
 
     return f(won, lost)
+
+
+def draw_from_score(p: float, won: int = 0, lost: int = 0) -> float:
+    """Вероятность ничьей 1:1 в Bo2 при текущем счёте."""
+    if won + lost >= 2:
+        return float(won == lost == 1)
+    if won == 1:
+        return 1 - p
+    if lost == 1:
+        return p
+    return 2 * p * (1 - p)
+
+
+def format_hints(conn: sqlite3.Connection, now: int, days: int = 21) -> dict[str, int]:
+    """Нормализованное название турнира → самый частый формат его серий за последние недели (OpenDota)."""
+    from .sim import BEST_OF
+
+    try:
+        rows = conn.execute(
+            """SELECT league_name, series_type, COUNT(DISTINCT series_id) FROM pro_maps
+               WHERE start_time >= ? AND league_name IS NOT NULL AND series_id IS NOT NULL
+               GROUP BY league_name, series_type""", (now - days * 86400,)).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    best: dict[str, tuple[int, int]] = {}
+    for name, st, n in rows:
+        key = normalize_raw(name)
+        if key and (key not in best or n > best[key][1]):
+            best[key] = (BEST_OF.get(st, 3), n)
+    return {k: v[0] for k, v in best.items()}
+
+
+def tournament_format(hints: dict[str, int], tournament: str | None) -> int | None:
+    key = normalize_raw(tournament or "")
+    if not key or not hints:
+        return None
+    if key in hints:
+        return hints[key]
+    close = [k for k in hints if len(k) >= 6 and (k in key or key in k)]
+    return hints[max(close, key=len)] if close else None
 
 
 @dataclass
@@ -84,12 +136,28 @@ class BoardMatch:
     score: str | None
     phase: str
     quotes: dict[str, dict[str, Quote]] = field(default_factory=dict)  # market -> outcome -> quote
+    fmt_hint: int | None = None  # формат по прошлым сериям этого турнира в OpenDota
+
+    @property
+    def draw_outcome(self) -> str | None:
+        """Название исхода «ничья» на победу в матче, если букмекер его даёт (это Bo2)."""
+        return next((o for o in self.quotes.get("match_winner", {}) if is_draw(o)), None)
 
     @property
     def best_of(self) -> int:
+        if self.draw_outcome:
+            return 2
         maps = [int(m.split("_")[1]) for m in self.quotes if m.startswith("map_")]
         top = max(maps, default=0)
-        return 5 if top >= 4 else 3 if top >= 2 else 3
+        if top >= 4:
+            return 5
+        if top == 3 and self.fmt_hint in (1, 2):
+            return 3  # третья карта бывает только в Bo3+
+        return self.fmt_hint or 3
+
+    @property
+    def format_known(self) -> bool:
+        return bool(self.draw_outcome or self.fmt_hint or any(m in self.quotes for m in ("map_3_winner", "map_4_winner")))
 
     @property
     def maps_score(self) -> tuple[int, int]:
@@ -118,6 +186,7 @@ def load_board(conn: sqlite3.Connection, since_hours: float = 6, now: datetime |
         (latest,),
     ).fetchall()
     out = []
+    hints = format_hints(conn, int(now.timestamp()))
     for mid, t1, t2, start, tour, score, seen in matches:
         open_markets = {m for (m,) in conn.execute(
             "SELECT market FROM feed_markets WHERE source='oddiwire' AND fixture_id=? AND last_seen>=?", (mid, seen))}
@@ -127,7 +196,7 @@ def load_board(conn: sqlite3.Connection, since_hours: float = 6, now: datetime |
                WHERE source='oddiwire' AND fixture_id=? ORDER BY id""",
             (mid,),
         ).fetchall()
-        bm = BoardMatch(mid, t1, t2, start, tour, score, "prematch")
+        bm = BoardMatch(mid, t1, t2, start, tour, score, "prematch", fmt_hint=tournament_format(hints, tour))
         last_time = ""
         for market, outcome, price, fair, taken, phase in rows:
             bm.quotes.setdefault(market, {})[outcome] = Quote(market, outcome, price, fair, taken)
@@ -163,6 +232,8 @@ class Analysis:
     known: tuple[rating.TeamState | None, rating.TeamState | None]
     p_map: float | None = None
     p_series: float | None = None
+    p_draw: float | None = None    # Bo2: ничья 1:1
+    p_series2: float | None = None  # вероятность серии для team2 (в Bo2 не равна 1 − p_series)
     picks: list[Pick] = field(default_factory=list)
     factors: list[tuple[str, float, float]] = field(default_factory=list)
 
@@ -178,14 +249,22 @@ def analyze(bm: BoardMatch, model, now: int | None = None) -> Analysis:
         res.factors = model.explain(a[0], b[0], now)
     won, lost = bm.maps_score
     res.p_map = p
-    res.p_series = series_from_score(p, bm.best_of, won, lost)
+    bo = bm.best_of
+    res.p_series = series_from_score(p, bo, won, lost)
+    res.p_series2 = series_from_score(1 - p, bo, lost, won)
+    if bo == 2:
+        res.p_draw = draw_from_score(p, won, lost)
     # в эфире текущая карта уже идёт — рейтинг не знает, что на ней происходит; берём следующую
     next_map = won + lost + (2 if bm.phase == "live" else 1)
-    for market, prob in (("match_winner", res.p_series), (f"map_{next_map}_winner", p)):
-        for team, team_prob in ((bm.team1, prob), (bm.team2, 1 - prob)):
-            q = bm.price(market, team)
-            if q:
-                res.picks.append(Pick(market, team, q.price, team_prob, q.fair_prob))
+    outcomes = [("match_winner", bm.team1, res.p_series), ("match_winner", bm.team2, res.p_series2)]
+    if res.p_draw is not None and bm.draw_outcome:
+        outcomes.append(("match_winner", bm.draw_outcome, res.p_draw))
+    if bo > 1 or bm.phase != "live":
+        outcomes += [(f"map_{next_map}_winner", bm.team1, p), (f"map_{next_map}_winner", bm.team2, 1 - p)]
+    for market, team, team_prob in outcomes:
+        q = bm.price(market, team)
+        if q:
+            res.picks.append(Pick(market, team, q.price, team_prob, q.fair_prob))
     return res
 
 
