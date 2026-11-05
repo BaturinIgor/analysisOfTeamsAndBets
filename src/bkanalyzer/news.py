@@ -175,16 +175,16 @@ def parse_rss(text: str, now: int, days: int = NEWS_DAYS) -> list[NewsItem]:
 FEEDS = (("ru", "RU", "RU:ru"), ("en", "US", "US:en"))
 
 
-def _query(team: str) -> str:
-    return f'"{team}" dota'
+def _query(team: str, word: str = "dota") -> str:
+    return f'"{team}" {word}'
 
 
-def fetch_news(client: httpx.Client, team: str, now: int) -> list[NewsItem]:
+def fetch_news(client: httpx.Client, team: str, now: int, word: str = "dota") -> list[NewsItem]:
     items: list[NewsItem] = []
     for hl, gl, ceid in FEEDS:
         try:
             resp = client.get("https://news.google.com/rss/search",
-                              params={"q": f"{_query(team)} when:{NEWS_DAYS}d", "hl": hl, "gl": gl, "ceid": ceid})
+                              params={"q": f"{_query(team, word)} when:{NEWS_DAYS}d", "hl": hl, "gl": gl, "ceid": ceid})
         except httpx.HTTPError:
             continue
         if resp.status_code == 200:
@@ -199,17 +199,18 @@ def fetch_news(client: httpx.Client, team: str, now: int) -> list[NewsItem]:
     return uniq
 
 
-def team_news(conn: sqlite3.Connection, client: httpx.Client | None, team: str, now: int | None = None) -> list[NewsItem]:
+def team_news(conn: sqlite3.Connection, client: httpx.Client | None, team: str, now: int | None = None,
+              word: str = "dota") -> list[NewsItem]:
     """Новости за 7 дней с кэшем на 6 часов. Без клиента — только из кэша."""
     ensure_schema(conn)
     now = now or int(time.time())
-    q = _query(team).casefold()
+    q = _query(team, word).casefold()
     row = conn.execute("SELECT fetched_at, items FROM news_cache WHERE query=?", (q,)).fetchone()
     if row and (now - row[0] < NEWS_TTL or client is None):
         return [NewsItem(**d) for d in json.loads(row[1])]
     if client is None:
         return []
-    items = fetch_news(client, team, now)
+    items = fetch_news(client, team, now, word)
     conn.execute("INSERT OR REPLACE INTO news_cache VALUES (?,?,?)",
                  (q, now, json.dumps([it.__dict__ for it in items], ensure_ascii=False)))
     conn.commit()

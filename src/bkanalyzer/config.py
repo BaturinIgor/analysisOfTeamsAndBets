@@ -17,6 +17,7 @@ class Settings:
     oddspapi_base_url: str = "https://api.oddspapi.io/v4"
     oddspapi_winner_market: str = ""
     oddiwire_api_key: str = ""
+    pandascore_token: str = ""   # бесплатный ключ PandaScore: история CS2; без него CS2 не собираем
     signal_min_ev: float = 0.03
     signal_min_prob: float = 0.0
     signal_min_odds: float = 1.0
@@ -35,6 +36,12 @@ class Settings:
 
         return SimSettings(self.sim_bank, self.sim_strategy, self.sim_stake, self.sim_percent, self.sim_kelly,
                            strategies=self.sim_strategies)
+
+    @property
+    def games(self):
+        from .games import CS2, DOTA
+
+        return (DOTA, CS2) if self.pandascore_token else (DOTA,)
 
     def thresholds(self):
         from .analysis import Thresholds
@@ -66,6 +73,7 @@ def load_settings(env_file: str | os.PathLike | None = ".env") -> Settings:
         oddspapi_base_url=g("ODDSPAPI_BASE_URL", "https://api.oddspapi.io/v4").rstrip("/"),
         oddspapi_winner_market=g("ODDSPAPI_WINNER_MARKET", ""),
         oddiwire_api_key=g("ODDIWIRE_API_KEY", ""),
+        pandascore_token=g("PANDASCORE_TOKEN", ""),
         signal_min_ev=float(g("SIGNAL_MIN_EV", "") or 0.03),
         signal_min_prob=float(g("SIGNAL_MIN_PROB", "") or 0.0),
         signal_min_odds=float(g("SIGNAL_MIN_ODDS", "") or 1.0),

@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from . import sim as simmod
 from .analysis import Analysis, Thresholds, market_label
+from .games import by_key
 
 GREEN, RED, GREY = "C6EFCE", "FFC7CE", "EDEDED"
 STATUS = {"open": "открыта", "won": "выигрыш", "lost": "проигрыш", "void": "возврат"}
@@ -32,7 +33,7 @@ def match_rows(analyses: list[Analysis], t: Thresholds, tz: ZoneInfo) -> list[tu
     out = []
     for a in analyses:
         m = a.match
-        base = [_local(m.start_time, tz), "в эфире" if m.phase == "live" else "до матча", m.score or "", m.team1, m.team2]
+        base = [by_key(m.game).label, _local(m.start_time, tz), "в эфире" if m.phase == "live" else "до матча", m.score or "", m.team1, m.team2]
         if not a.picks:
             note = "команда не найдена в истории" if None in a.known else "нет коэффициентов на рынки, которые мы считаем"
             out.append((base + ["", "", None, None, None, None, note], GREY))
@@ -51,7 +52,7 @@ def match_rows(analyses: list[Analysis], t: Thresholds, tz: ZoneInfo) -> list[tu
     return out
 
 
-MATCH_HEAD = ["Начало", "Фаза", "Счёт", "Команда 1", "Команда 2", "Рынок", "Исход", "Коэф.",
+MATCH_HEAD = ["Игра", "Начало", "Фаза", "Счёт", "Команда 1", "Команда 2", "Рынок", "Исход", "Коэф.",
               "Наша вероятность", "Вероятность рынка", "EV", "Пометка"]
 BET_HEAD = ["№", "Поставлена", "Режим", "Начало", "Команда 1", "Команда 2", "Рынок", "Ставка на", "Коэф.",
             "Наша вероятность", "Вероятность рынка", "EV", "Сумма", "Банк до", "Стратегия", "Статус",
@@ -83,6 +84,8 @@ def summary_rows(conn: sqlite3.Connection, cfg: simmod.SimSettings) -> list[tupl
     for mode in simmod.MODES:
         for c in simmod.strategies_for(cfg, mode):
             s = simmod.summary(conn, c, mode)
+            if mode in simmod.OPTIONAL_MODES + ("cs_longshot",) and not s["bets"]:
+                continue
             values = [simmod.MODE_LABEL[mode], simmod.STRATEGY_LABEL.get(c.strategy, c.strategy), s["bets"], s["open"], s["won"], s["lost"], s["void"], round(s["staked"], 2),
                       round(s["profit"], 2), round(s["roi"], 4) if s["roi"] is not None else None, round(s["bank"], 2),
                       round(s["max_dd"], 4), s["worst_streak"], round(s["clv"], 4) if s["clv"] is not None else None]

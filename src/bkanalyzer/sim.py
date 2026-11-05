@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 from .analysis import Analysis, Thresholds, is_draw, market_label, normalize
+from .games import by_key, by_mode
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS paper_bets (
@@ -42,12 +43,14 @@ CREATE TABLE IF NOT EXISTS paper_bets (
 );
 """
 
-MODES = ("prematch", "draft", "live", "longshot")
+MODES = ("prematch", "draft", "live", "longshot", "cs_prematch", "cs_live", "cs_longshot")
 MODE_LABEL = {"prematch": "до матча", "draft": "после драфта", "live": "в эфире",
-              "longshot": "аутсайдеры (на заметку)"}
+              "longshot": "аутсайдеры (на заметку)", "cs_prematch": "CS2 до матча", "cs_live": "CS2 в эфире",
+              "cs_longshot": "CS2 аутсайдеры (на заметку)"}
 # «аутсайдеры»: модель расходится с рынком сильнее SIGNAL_MAX_GAP. Такие ставки не делаем,
 # а записываем на заметку фиксированной суммой без уведомлений — чтобы проверить, кто прав.
-QUIET_MODES = ("longshot",)
+QUIET_MODES = ("longshot", "cs_longshot")
+OPTIONAL_MODES = ("cs_prematch", "cs_live")  # в отчёте — только если по ним уже есть ставки
 
 
 STRATEGY_LABEL = {"fixed": "фикс. сумма", "percent": "% банка", "kelly": "Келли"}
@@ -136,7 +139,7 @@ def place_bets(conn: sqlite3.Connection, analyses: list[Analysis], thresholds: T
     """Ставит по одному лучшему сигналу на матч в его текущем режиме. Возвращает новые ставки."""
     placed = []
     for a in analyses:
-        mode = "live" if a.match.phase == "live" else "prematch"
+        mode = by_key(a.match.game).mode_prefix + ("live" if a.match.phase == "live" else "prematch")
         picks = [p for p in a.picks if thresholds.ok(p)]
         if picks:
             b = place_pick(conn, a, max(picks, key=lambda p: p.ev), mode, cfg, now)
@@ -157,7 +160,7 @@ def place_longshots(conn: sqlite3.Connection, analyses: list[Analysis], threshol
     for a in analyses:
         picks = [p for p in a.picks if thresholds.suspicious(p) and p.ev >= thresholds.min_ev]
         if picks:
-            b = place_pick(conn, a, max(picks, key=lambda p: p.ev), "longshot", fixed, now)
+            b = place_pick(conn, a, max(picks, key=lambda p: p.ev), by_key(a.match.game).mode_prefix + "longshot", fixed, now)
             if b:
                 placed.append(b)
     return placed
@@ -168,7 +171,8 @@ def place_longshots(conn: sqlite3.Connection, analyses: list[Analysis], threshol
 
 def result_known(conn: sqlite3.Connection, a: Analysis, pick) -> bool:
     try:
-        maps = find_series(conn, a.match.team1, a.match.team2, a.match.start_time, datetime.now(timezone.utc).isoformat())
+        maps = find_series(conn, a.match.team1, a.match.team2, a.match.start_time, datetime.now(timezone.utc).isoformat(),
+                           table=by_key(a.match.game).maps_table)
     except sqlite3.OperationalError:  # истории карт ещё нет
         return False
     return bool(maps) and settle_result({"pick": pick.team, "market": pick.market}, maps) is not None
@@ -185,8 +189,9 @@ def _ts(iso: str | None) -> int | None:
         return None
 
 
-def find_series(conn: sqlite3.Connection, team1: str, team2: str, start_iso: str | None, created_iso: str) -> list[sqlite3.Row] | None:
-    """Карты серии этих команд из OpenDota после начала матча (по возрастанию времени)."""
+def find_series(conn: sqlite3.Connection, team1: str, team2: str, start_iso: str | None, created_iso: str,
+                table: str = "pro_maps") -> list[sqlite3.Row] | None:
+    """Карты серии этих команд из истории игры (pro_maps или cs_maps) после начала матча, по возрастанию времени."""
     from . import aliases
 
     aliases.load(conn)
@@ -194,7 +199,7 @@ def find_series(conn: sqlite3.Connection, team1: str, team2: str, start_iso: str
     start = _ts(start_iso) or _ts(created_iso) or 0
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
-        "SELECT * FROM pro_maps WHERE start_time BETWEEN ? AND ? ORDER BY start_time",
+        f"SELECT * FROM {table} WHERE start_time BETWEEN ? AND ? ORDER BY start_time, match_id",
         (start - 3 * 3600, start + 2 * 86400),
     ).fetchall()
     conn.row_factory = None
@@ -255,7 +260,7 @@ def settle_result(bet: dict, maps: list) -> tuple[str, str] | None:
 
 def closing_price(conn: sqlite3.Connection, bet: dict) -> float | None:
     row = conn.execute(
-        """SELECT price FROM odds_snapshots WHERE source='oddiwire' AND fixture_id=? AND market=? AND outcome=?
+        """SELECT price FROM odds_snapshots WHERE source IN ('oddiwire', 'oddiwire_cs2') AND fixture_id=? AND market=? AND outcome=?
              AND (phase='prematch' OR phase IS NULL) ORDER BY id DESC LIMIT 1""",
         (bet["fixture_id"], bet["market"], bet["pick"]),
     ).fetchone()
@@ -263,7 +268,7 @@ def closing_price(conn: sqlite3.Connection, bet: dict) -> float | None:
 
 
 def settle(conn: sqlite3.Connection, now: datetime | None = None, void_after_days: float = 3) -> list[dict]:
-    """Рассчитывает открытые ставки по картам из pro_maps. Возвращает рассчитанные."""
+    """Рассчитывает открытые ставки по истории карт их игры (Dota — pro_maps, CS2 — cs_maps). Возвращает рассчитанные."""
     ensure_schema(conn)
     now = now or datetime.now(timezone.utc)
     conn.row_factory = sqlite3.Row
@@ -271,7 +276,11 @@ def settle(conn: sqlite3.Connection, now: datetime | None = None, void_after_day
     conn.row_factory = None
     done = []
     for bet in bets:
-        maps = find_series(conn, bet["team1"], bet["team2"], bet["start_time"], bet["created_at"])
+        game = by_mode(bet["mode"])
+        try:
+            maps = find_series(conn, bet["team1"], bet["team2"], bet["start_time"], bet["created_at"], table=game.maps_table)
+        except sqlite3.OperationalError:  # истории этой игры ещё нет
+            maps = None
         bet["draw_offered"] = bool(conn.execute(
             "SELECT 1 FROM odds_snapshots WHERE fixture_id=? AND market='match_winner' AND LOWER(outcome) IN ('draw','x','tie','ничья') LIMIT 1",
             (bet["fixture_id"],)).fetchone())
@@ -280,10 +289,10 @@ def settle(conn: sqlite3.Connection, now: datetime | None = None, void_after_day
             created = datetime.fromisoformat(bet["created_at"])
             if now - created < timedelta(days=void_after_days):
                 continue
-            res = ("void", "результат не найден в OpenDota за 3 дня")
+            res = ("void", f"результат не найден в истории {game.label} за 3 дня")
         status, note = res
         profit = round(bet["stake"] * (bet["price"] - 1), 2) if status == "won" else -bet["stake"] if status == "lost" else 0.0
-        close = closing_price(conn, bet) if bet["mode"] == "prematch" else None
+        close = closing_price(conn, bet) if bet["mode"] in ("prematch", "cs_prematch") else None
         conn.execute(
             "UPDATE paper_bets SET status=?, profit=?, closing_price=?, settled_at=?, note=? WHERE id=?",
             (status, profit, close, now.isoformat(timespec="seconds"), note, bet["id"]),
@@ -332,6 +341,10 @@ def bet_line(r: dict, with_stake: bool = True) -> str:
     return f"{icon} {r['team1']} — {r['team2']}, {market_label(r['market'])}: {r['pick']} @ {r['price']:.2f}, ставка {r['stake']:.0f}{tail}"
 
 
+def _cap(s: str) -> str:
+    return s[:1].upper() + s[1:]
+
+
 def report(conn: sqlite3.Connection, cfg: SimSettings) -> str:
     strategies = cfg.all()
     lines = [f"Симулятор: старт {cfg.bank:.0f} у каждой стратегии; {cfg.describe()}"]
@@ -339,11 +352,13 @@ def report(conn: sqlite3.Connection, cfg: SimSettings) -> str:
     for mode in MODES:
         sums = [summary(conn, c, mode) for c in strategies_for(cfg, mode)]
         main = sums[0]
+        if mode in OPTIONAL_MODES and not main["bets"]:
+            continue
         if mode in QUIET_MODES:
             settled = [r for r in main["rows"] if r["status"] in ("won", "lost")]
             if not main["bets"]:
                 continue
-            lines.append(f"\n{MODE_LABEL[mode].capitalize()}: записей {main['bets']}, рассчитано {len(settled)}")
+            lines.append(f"\n{_cap(MODE_LABEL[mode])}: записей {main['bets']}, рассчитано {len(settled)}")
             if settled:
                 hit = sum(r["status"] == "won" for r in settled) / len(settled)
                 ours = sum(r["prob"] for r in settled) / len(settled)
@@ -352,7 +367,7 @@ def report(conn: sqlite3.Connection, cfg: SimSettings) -> str:
                 lines.append(f"  выиграли {hit:.0%}; модель давала {ours:.0%}{book_txt}; "
                              f"прибыль фикс. суммой {main['profit']:+.0f}")
             continue
-        lines.append(f"\n{MODE_LABEL[mode].capitalize()}: ставок {main['bets']} (открыто {main['open']}, ✅ {main['won']}, ❌ {main['lost']}, ↩️ {main['void']})")
+        lines.append(f"\n{_cap(MODE_LABEL[mode])}: ставок {main['bets']} (открыто {main['open']}, ✅ {main['won']}, ❌ {main['lost']}, ↩️ {main['void']})")
         total += main["won"] + main["lost"]
         if main["won"] + main["lost"]:
             for s in sums:

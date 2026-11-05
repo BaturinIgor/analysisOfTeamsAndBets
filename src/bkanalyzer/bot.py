@@ -17,12 +17,13 @@ import httpx
 
 from . import analysis, rating, sim as simmod
 from .analysis import Analysis, Thresholds, market_label
+from .games import CS2, DOTA, Game, by_key
 
 API = "https://api.telegram.org"
 NOISY_FAILS = 3  # с какого обрыва подряд писать в лог
 MAX_LEN = 4000
 
-HELP = """Анализатор ставок Dota 2
+HELP = """Анализатор ставок Dota 2 и CS2
 
 Пользуйтесь кнопками внизу экрана. Под списком матчей — кнопки разбора (🔎) и новостей (📰).
 Можно просто написать название команды — покажу её матч или рейтинг.
@@ -42,7 +43,8 @@ HELP = """Анализатор ставок Dota 2
 
 Коэффициенты: линия Oddin (на ней работает BetBoom), обновляется автоматически.
 Вероятности: рейтинг Elo + форма + личные встречи + патч + стабильность состава по картам Tier 1–2, обучено на истории.
-После драфта — ещё сила героев в патче и опыт игроков на них."""
+После драфта — ещё сила героев в патче и опыт игроков на них.
+CS2: рейтинг Elo по сериям из PandaScore (нужен бесплатный PANDASCORE_TOKEN), только победа в матче."""
 
 
 
@@ -76,14 +78,18 @@ def reply_markup(reply: Reply) -> dict | None:
 class ModelCache:
     """Модель переобучается, только когда в базе появились новые карты."""
 
-    def __init__(self, eval_days: int = 180):
+    def __init__(self, eval_days: int = 180, game: Game = DOTA):
         self._key = None
         self._model = None
         self.report = None
         self.eval_days = eval_days
+        self.game = game
 
     def get(self, conn: sqlite3.Connection):
         from . import history, model as mm
+
+        if self.game.key == "cs2":
+            return self._get_cs(conn)
 
         history.ensure_schema(conn)
         conn.row_factory = None
@@ -110,6 +116,20 @@ class ModelCache:
             self._model, self.report = mm.train(maps, since, patches=patches if patches.names else None)
             self._key = key
         return self._model, key[0] or 0  # число карт в базе
+
+    def _get_cs(self, conn: sqlite3.Connection):
+        from . import aliases, cs, model as mm
+
+        cs.ensure_schema(conn)
+        aliases.load(conn)
+        conn.row_factory = None
+        key = conn.execute("SELECT COUNT(*), MAX(match_id) FROM cs_maps").fetchone()
+        if key != self._key or self._model is None:
+            maps = cs.maps(conn)
+            since = (maps[-1]["start_time"] - self.eval_days * 86400) if maps else 0
+            self._model, self.report = mm.train(maps, since)
+            self._key = key
+        return self._model, key[0] or 0
 
 
 def _local(ts: str | None, tz: ZoneInfo) -> str:
@@ -143,17 +163,28 @@ class Bot:
         self.export_dir = Path(export_dir)
         self.news_client = news_client  # None — новости только из кэша (в тестах)
         self.models = ModelCache()
+        self.cs_models = ModelCache(game=CS2)
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._last_list: list[str] = []  # fixture_id по номерам из /today
 
     # --- данные -------------------------------------------------------------
+    def _models(self, game: Game | str) -> ModelCache:
+        return self.cs_models if (game if isinstance(game, str) else game.key) == "cs2" else self.models
+
     def _analyses(self, live_only: bool = False) -> tuple[list[Analysis], int]:
-        model, maps = self.models.get(self.conn)
+        """Матчи Dota, затем CS2. Второе значение — число карт Dota в истории."""
         now = self._now()
-        board = analysis.load_board(self.conn, now=now)
-        if live_only:
-            board = [m for m in board if m.phase == "live"]
-        return [analysis.analyze(m, model, int(now.timestamp())) for m in board], maps
+        out = []
+        dota_maps = self.models.get(self.conn)[1]
+        for game in (DOTA, CS2):
+            board = analysis.load_board(self.conn, now=now, game=game)
+            if live_only:
+                board = [m for m in board if m.phase == "live"]
+            if not board:
+                continue
+            model, _ = self._models(game).get(self.conn)
+            out += [analysis.analyze(m, model, int(now.timestamp())) for m in board]
+        return out, dota_maps
 
     def _line(self, n: int, a: Analysis) -> str:
         m = a.match
@@ -177,12 +208,18 @@ class Bot:
     def today(self, live_only: bool = False) -> str | Reply:
         items, maps = self._analyses(live_only)
         if not items:
-            return "Сейчас в эфире матчей Dota нет." if live_only else "В линии нет матчей Dota. Проверьте, что запущен сбор: bk collect-odds"
+            return "Сейчас в эфире матчей нет." if live_only else "В линии нет матчей. Проверьте, что запущен сбор: bk bot"
         self._last_list = [a.match.fixture_id for a in items]
-        lines = ["Матчи в эфире:" if live_only else "Матчи Dota в линии:"]
-        lines += [self._line(i, a) for i, a in enumerate(items, 1)]
-        if not maps:
-            lines.append("\nИстории матчей нет — оценки не будет. Запустите один раз: bk sync-matches")
+        lines = []
+        for i, a in enumerate(items, 1):
+            if i == 1 or a.match.game != items[i - 2].match.game:
+                label = by_key(a.match.game).label
+                lines.append(("" if i == 1 else "\n") + (f"{label} в эфире:" if live_only else f"Матчи {label} в линии:"))
+            lines.append(self._line(i, a))
+        if not maps and any(a.match.game == "dota2" for a in items):
+            lines.append("\nИстории матчей Dota нет — оценки не будет. Запустите один раз: bk sync-matches")
+        if any(a.match.game == "cs2" for a in items) and not self.cs_models.get(self.conn)[1]:
+            lines.append("\nИстории CS2 нет — оценки не будет. Нужен PANDASCORE_TOKEN в .env, затем: bk sync-cs")
         lines.append("\nПодробно — кнопки ниже (🔎 разбор, 📰 состав и новости).")
         buttons = []
         for i, a in enumerate(items[:20], 1):
@@ -208,15 +245,17 @@ class Bot:
         """Состав по нашим данным и новости с флагами риска для обеих команд."""
         from . import news
 
-        model, _ = self.models.get(self.conn)
+        game = by_key(m.game)
         lines = []
+        if game is DOTA:  # состав по картам знаем только для Dota (OpenDota)
+            model, _ = self.models.get(self.conn)
+            for team in (m.team1, m.team2):
+                found = analysis.match_team(model, team)
+                r = news.roster_risk(self.conn, found[0], now) if found else None
+                if r:
+                    lines.append("⚠️ " + r.text(team))
         for team in (m.team1, m.team2):
-            found = analysis.match_team(model, team)
-            r = news.roster_risk(self.conn, found[0], now) if found else None
-            if r:
-                lines.append("⚠️ " + r.text(team))
-        for team in (m.team1, m.team2):
-            items = news.team_news(self.conn, self.news_client if fetch else None, team, now)
+            items = news.team_news(self.conn, self.news_client if fetch else None, team, now, game.news_word)
             risky = [it for it in items if it.risks]
             if risky:
                 it = risky[0]
@@ -232,14 +271,15 @@ class Bot:
         items, _ = self._analyses()
         target = self._find(items, arg) if items else None
         teams = [target.match.team1, target.match.team2] if target else [arg]
+        game = by_key(target.match.game) if target else DOTA
         lines = []
         model, _ = self.models.get(self.conn)
         for team in teams:
-            found = analysis.match_team(model, team)
+            found = analysis.match_team(model, team) if game is DOTA else None
             r = news.roster_risk(self.conn, found[0], now) if found else None
             if r:
                 lines.append("⚠️ " + r.text(team))
-            lines += news.news_block(team, news.team_news(self.conn, self.news_client, team, now))
+            lines += news.news_block(team, news.team_news(self.conn, self.news_client, team, now, game.news_word))
             lines.append("")
         if target:
             fid = target.match.fixture_id
@@ -249,14 +289,15 @@ class Bot:
     def match(self, arg: str) -> str | Reply:
         items, _ = self._analyses()
         if not items:
-            return "В линии нет матчей Dota."
+            return "В линии нет матчей."
         target = self._find(items, arg)
         if target is None:
             return "Не нашёл матч. Посмотрите номера в /today"
         a, m = target, target.match
+        game = by_key(m.game)
         s1, s2 = a.known
         lines = [
-            f"{m.team1} — {m.team2}",
+            f"{m.team1} — {m.team2}" + (f" ({game.label})" if game is not DOTA else ""),
             f"{m.tournament or ''}, Bo{m.best_of}{'' if m.format_known else ' (формат не известен, считаю Bo3)'}, начало {_local(m.start_time, self.tz)}" + (f", в эфире, счёт {m.score}" if m.phase == "live" else ""),
             f"Рейтинг: {_team(m.team1, s1)} vs {_team(m.team2, s2)}",
         ]
@@ -272,7 +313,8 @@ class Bot:
                 lines += [f"  {LABELS.get(n, n)}: {c:+.2f}" for n, _, c in top if abs(c) >= 0.01]
         else:
             missing = [t for t, st in ((m.team1, s1), (m.team2, s2)) if st is None]
-            lines.append(f"Нашей оценки нет: не нашёл в истории Tier 1–2 {', '.join(missing) or 'одну из команд'}. "
+            where = "Tier 1–2" if game is DOTA else "CS2 (PandaScore)"
+            lines.append(f"Нашей оценки нет: не нашёл в истории {where} {', '.join(missing) or 'одну из команд'}. "
                          "Если это переименованная команда, свяжите названия на Mac: bk unmatched, затем bk alias")
         lines.append("\nЛиния Oddin (коэфф. · вероятность БК без маржи):")
         for market in sorted(m.quotes, key=lambda k: (k != "match_winner", k)):
@@ -290,8 +332,11 @@ class Bot:
                 lines.append("Ставки нет: перевес ниже порога.")
         risk = self.risks(m, int(self._now().timestamp()))
         lines.append("\nРиски:" + ("\n" + "\n".join(risk) if risk else " по составу и новостям за 7 дней ничего не нашёл."))
-        lines.append("Модель не знает героев до драфта (после драфта бот пересчитает карту сам и пришлёт сигнал, если он есть). "
-                     "Подробнее — кнопка «Новости» ниже.")
+        if game is DOTA:
+            lines.append("Модель не знает героев до драфта (после драфта бот пересчитает карту сам и пришлёт сигнал, если он есть). "
+                         "Подробнее — кнопка «Новости» ниже.")
+        else:
+            lines.append("CS2: модель знает только силу команд по сериям (без карт, пиков и состава), считаем только победу в матче.")
         fid = m.fixture_id
         return Reply("\n".join(lines), buttons=[[("📰 Состав и новости", f"n:{fid}"), ("🔄 Обновить", f"m:{fid}")]])
 
@@ -308,16 +353,22 @@ class Bot:
     def team(self, query: str) -> str:
         if not query:
             return "Напишите: /team название"
-        model, maps = self.models.get(self.conn)
-        if not maps:
+        out = []
+        for game in (DOTA, CS2):
+            model, maps = self._models(game).get(self.conn)
+            found = analysis.match_team(model, query) if maps else None
+            if not found:
+                continue
+            tid, st = found
+            ranked = sorted((s.rating for s in model.teams.values() if s.games >= 20), reverse=True)
+            place = sum(1 for r in ranked if r > st.rating) + 1
+            out.append(f"{game.label}: {st.name}: рейтинг {st.rating:.0f}, карт в истории {st.games}, "
+                       f"место {place} из {len(ranked)} (команды с 20+ картами)")
+        if out:
+            return "\n".join(out)
+        if not self.models.get(self.conn)[1]:
             return "Истории матчей нет. Запустите: bk sync-matches"
-        found = analysis.match_team(model, query)
-        if not found:
-            return f"Команда «{query}» не найдена в Tier 1–2"
-        tid, st = found
-        ranked = sorted((s.rating for s in model.teams.values() if s.games >= 20), reverse=True)
-        place = sum(1 for r in ranked if r > st.rating) + 1
-        return f"{st.name}: рейтинг {st.rating:.0f}, карт в истории {st.games}, место {place} из {len(ranked)} (команды с 20+ картами)"
+        return f"Команда «{query}» не найдена в истории"
 
     def model_report(self) -> str:
         from .model import FEATURES, LABELS
@@ -348,6 +399,12 @@ class Bot:
         if r.features_eval is not None:
             lines.append(f"Признаки команд проиграли рейтингу на последних днях (log-loss {r.features_eval.log_loss:.4f}), "
                          "поэтому до драфта работает рейтинг Elo, а драфт добавляется сверху.")
+        _, cs_maps = self.cs_models.get(self.conn)
+        c = self.cs_models.report
+        if cs_maps and c is not None and c.model_eval.n:
+            lines.append(f"\nCS2 ({c.model_eval.n} карт за {self.cs_models.eval_days} дней): рейтинг — точность {c.elo_eval.accuracy:.1%}, "
+                         f"log-loss {c.elo_eval.log_loss:.4f}; модель — {c.model_eval.accuracy:.1%}, {c.model_eval.log_loss:.4f}")
+            lines += [f"  {rng}: карт {n}, прогноз {p:.0%}, факт {y:.0%}" for rng, n, p, y in c.model_eval.buckets]
         return "\n".join(lines)
 
     def settings(self) -> str:

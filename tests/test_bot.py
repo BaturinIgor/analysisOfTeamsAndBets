@@ -215,7 +215,7 @@ def test_buttons_menu_and_callbacks(bot):
     start = bot.handle(ME, "/start")
     assert isinstance(start, Reply) and reply_markup(start)["keyboard"][0][0]["text"] == "📋 Матчи"
     today = bot.handle(ME, "📋 Матчи")  # кнопка меню = /today
-    assert "Матчи Dota в линии" in today
+    assert "Матчи Dota 2 в линии" in today
     kb = reply_markup(today)["inline_keyboard"]
     data = {b["callback_data"] for row in kb for b in row}
     assert {"m:e1", "n:e1", "m:e2"} <= data

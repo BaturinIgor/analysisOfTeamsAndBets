@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 
 from . import rating
+from .games import DOTA, Game, by_key
 
 STOP_WORDS = {"team", "esports", "esport", "gaming", "club", "the", "e-sports", "gg"}
 
@@ -88,13 +89,13 @@ def draw_from_score(p: float, won: int = 0, lost: int = 0) -> float:
     return 2 * p * (1 - p)
 
 
-def format_hints(conn: sqlite3.Connection, now: int, days: int = 21) -> dict[str, int]:
-    """Нормализованное название турнира → самый частый формат его серий за последние недели (OpenDota)."""
+def format_hints(conn: sqlite3.Connection, now: int, days: int = 21, table: str = "pro_maps") -> dict[str, int]:
+    """Нормализованное название турнира → самый частый формат его серий за последние недели (по истории игры)."""
     from .sim import BEST_OF
 
     try:
         rows = conn.execute(
-            """SELECT league_name, series_type, COUNT(DISTINCT series_id) FROM pro_maps
+            f"""SELECT league_name, series_type, COUNT(DISTINCT series_id) FROM {table}
                WHERE start_time >= ? AND league_name IS NOT NULL AND series_id IS NOT NULL
                GROUP BY league_name, series_type""", (now - days * 86400,)).fetchall()
     except sqlite3.OperationalError:
@@ -136,7 +137,8 @@ class BoardMatch:
     score: str | None
     phase: str
     quotes: dict[str, dict[str, Quote]] = field(default_factory=dict)  # market -> outcome -> quote
-    fmt_hint: int | None = None  # формат по прошлым сериям этого турнира в OpenDota
+    fmt_hint: int | None = None  # формат по прошлым сериям этого турнира в истории
+    game: str = "dota2"
 
     @property
     def draw_outcome(self) -> str | None:
@@ -171,32 +173,33 @@ class BoardMatch:
         return self.quotes.get(market, {}).get(team)
 
 
-def load_board(conn: sqlite3.Connection, since_hours: float = 6, now: datetime | None = None) -> list[BoardMatch]:
-    """Матчи OddiWire с последними коэффициентами; только те, что обновлялись за since_hours."""
+def load_board(conn: sqlite3.Connection, since_hours: float = 6, now: datetime | None = None, game: Game = DOTA) -> list[BoardMatch]:
+    """Матчи игры из OddiWire с последними коэффициентами; только те, что обновлялись за since_hours."""
+    src = game.source
     now = now or datetime.now(timezone.utc)
     cutoff = datetime.fromtimestamp(now.timestamp() - since_hours * 3600, timezone.utc).isoformat(timespec="seconds")
     conn.row_factory = None
-    latest = conn.execute("SELECT MAX(updated_at) FROM bookmaker_matches WHERE source='oddiwire'").fetchone()[0]
+    latest = conn.execute("SELECT MAX(updated_at) FROM bookmaker_matches WHERE source=?", (src,)).fetchone()[0]
     if not latest or latest < cutoff:
         return []
     # только матчи из последнего снимка: закончившиеся пропадают из ленты
     matches = conn.execute(
         """SELECT match_id, team1, team2, start_time, tournament_id, score, updated_at FROM bookmaker_matches
-           WHERE source='oddiwire' AND updated_at = ? ORDER BY start_time""",
-        (latest,),
+           WHERE source=? AND updated_at = ? ORDER BY start_time""",
+        (src, latest),
     ).fetchall()
     out = []
-    hints = format_hints(conn, int(now.timestamp()))
+    hints = format_hints(conn, int(now.timestamp()), table=game.maps_table)
     for mid, t1, t2, start, tour, score, seen in matches:
         open_markets = {m for (m,) in conn.execute(
-            "SELECT market FROM feed_markets WHERE source='oddiwire' AND fixture_id=? AND last_seen>=?", (mid, seen))}
-        tracked = conn.execute("SELECT 1 FROM feed_markets WHERE source='oddiwire' AND fixture_id=? LIMIT 1", (mid,)).fetchone()
+            "SELECT market FROM feed_markets WHERE source=? AND fixture_id=? AND last_seen>=?", (src, mid, seen))}
+        tracked = conn.execute("SELECT 1 FROM feed_markets WHERE source=? AND fixture_id=? LIMIT 1", (src, mid)).fetchone()
         rows = conn.execute(
             """SELECT market, outcome, price, fair_prob, taken_at, phase FROM odds_snapshots
-               WHERE source='oddiwire' AND fixture_id=? ORDER BY id""",
-            (mid,),
+               WHERE source=? AND fixture_id=? ORDER BY id""",
+            (src, mid),
         ).fetchall()
-        bm = BoardMatch(mid, t1, t2, start, tour, score, "prematch", fmt_hint=tournament_format(hints, tour))
+        bm = BoardMatch(mid, t1, t2, start, tour, score, "prematch", fmt_hint=tournament_format(hints, tour), game=game.key)
         last_time = ""
         for market, outcome, price, fair, taken, phase in rows:
             bm.quotes.setdefault(market, {})[outcome] = Quote(market, outcome, price, fair, taken)
@@ -260,7 +263,7 @@ def analyze(bm: BoardMatch, model, now: int | None = None) -> Analysis:
     outcomes = [("match_winner", bm.team1, res.p_series), ("match_winner", bm.team2, res.p_series2)]
     if res.p_draw is not None and bm.draw_outcome:
         outcomes.append(("match_winner", bm.draw_outcome, res.p_draw))
-    if bo > 1 or bm.phase != "live":
+    if by_key(bm.game).map_markets and (bo > 1 or bm.phase != "live"):
         outcomes += [(f"map_{next_map}_winner", bm.team1, p), (f"map_{next_map}_winner", bm.team2, 1 - p)]
     for market, team, team_prob in outcomes:
         q = bm.price(market, team)

@@ -32,7 +32,7 @@ def test_export_xlsx_and_csv(tmp_path):
     assert wb.sheetnames == ["Матчи", "Ставки", "Итоги"]
     m = wb["Матчи"]
     rows = list(m.iter_rows(min_row=2, values_only=True))
-    spirit = next(i for i, row in enumerate(rows, 2) if row[6] == "Spirit" and row[5] == "матч")
+    spirit = next(i for i, row in enumerate(rows, 2) if row[7] == "Spirit" and row[6] == "матч")
     assert m.cell(spirit, 1).fill.fgColor.rgb.endswith("C6EFCE")  # положительный EV — зелёный
     bets = wb["Ставки"]
     assert bets.max_row >= 2 and bets.cell(2, 16).value == "проигрыш"
