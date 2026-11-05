@@ -237,6 +237,7 @@ class Report:
     draft_eval: Evaluation = field(default_factory=Evaluation)
     draft_weights: list[float] = field(default_factory=list)
     selected: list[str] = field(default_factory=list)  # признаки, прошедшие отбор
+    features_eval: Evaluation | None = None  # если признаки проиграли рейтингу: их результат до отката
 
 
 def fit_masked(samples, mask: list[bool], l2: float = 1.0) -> list[float]:
@@ -342,11 +343,18 @@ def train(maps, eval_since: int, min_games: int = 5,
     mask = select_features(sorted(train_s, key=lambda r: r[0])) if train_s else [i == 0 for i in range(len(FEATURES))]
     w = fit_masked(train_s, mask) if train_s else [math.log(10)] + [0.0] * (len(FEATURES) - 1)
     model_ev = evaluate([(_sigmoid(sum(wi * xi for wi, xi in zip(w, x))), y) for _, x, y, _ in val_s])
+    features_eval = None
+    if val_s and any(mask[1:]) and model_ev.log_loss > elo_ev.log_loss:
+        # признаки не обогнали рейтинг на свежих картах — работаем на одном рейтинге
+        features_eval = model_ev
+        mask = [i == 0 for i in range(len(mask))]
+        w = fit_masked(train_s, mask)
+        model_ev = evaluate([(_sigmoid(sum(wi * xi for wi, xi in zip(w, x))), y) for _, x, y, _ in val_s])
     # рабочая модель: веса на всех картах, состояние — на сегодня
     final_w = fit_masked(samples, mask) if samples else w
     state, _, _ = _walk(maps, params, min_games, collect_since=10**12, patches=patches)
     report = Report(elo_ev, model_ev, final_w, params["k"], params["half_life_days"], len(train_s),
-                    selected=[f for f, m in zip(FEATURES, mask) if m])
+                    selected=[f for f, m in zip(FEATURES, mask) if m], features_eval=features_eval)
 
     # модель после драфта: базовый логит + сила героев + опыт игроков на героях
     def drows(rows, weights):
