@@ -81,7 +81,7 @@ def bet_rows(conn: sqlite3.Connection, tz: ZoneInfo) -> list[tuple[list, str | N
 def summary_rows(conn: sqlite3.Connection, cfg: simmod.SimSettings) -> list[tuple[list, str | None]]:
     out = []
     for mode in simmod.MODES:
-        for c in cfg.all():
+        for c in simmod.strategies_for(cfg, mode):
             s = simmod.summary(conn, c, mode)
             values = [simmod.MODE_LABEL[mode], simmod.STRATEGY_LABEL.get(c.strategy, c.strategy), s["bets"], s["open"], s["won"], s["lost"], s["void"], round(s["staked"], 2),
                       round(s["profit"], 2), round(s["roi"], 4) if s["roi"] is not None else None, round(s["bank"], 2),
