@@ -601,6 +601,13 @@ def main(argv: list[str] | None = None) -> int:
     p_sr = sub.add_parser("sim-reset", help="удалить все бумажные ставки и начать симулятор заново")
     p_sr.add_argument("--yes", action="store_true", help="подтверждение")
 
+    p_al = sub.add_parser("alias", help="справочник синонимов: название в линии → название в истории OpenDota")
+    p_al.add_argument("name", nargs="?", help="как команда названа в линии")
+    p_al.add_argument("target", nargs="?", help="как она названа в OpenDota")
+    p_al.add_argument("--list", action="store_true", help="показать справочник")
+    p_al.add_argument("--remove", action="store_true", help="удалить синоним для name")
+    sub.add_parser("unmatched", help="команды из линии, которых нет в истории, и похожие названия")
+
     p_ex = sub.add_parser("export", help="выгрузка в xlsx (матчи, ставки, итоги) и CSV")
     p_ex.add_argument("--out", type=Path, default=None, help="папка для файлов (по умолчанию data/exports)")
 
@@ -704,6 +711,42 @@ def main(argv: list[str] | None = None) -> int:
         conn.execute("DELETE FROM paper_bets")
         conn.commit()
         print(f"Удалено бумажных ставок: {n}. Симулятор начнётся заново.")
+        return 0
+
+    if args.cmd == "alias":
+        from . import aliases
+
+        conn = db.connect(Path(s.db_path))
+        if args.list or not args.name:
+            rows = aliases.listing(conn)
+            print("\n".join(f"{a} → {t}" for a, t in rows) if rows else "Справочник пуст. Добавить: bk alias \"В линии\" \"В OpenDota\"")
+            return 0
+        if args.remove:
+            print("Удалено" if aliases.remove(conn, args.name) else "Такого синонима нет")
+            return 0
+        if not args.target:
+            print("Укажите оба названия: bk alias \"В линии\" \"В OpenDota\"")
+            return 1
+        try:
+            print(f"Записано: {args.name} → {aliases.add(conn, args.name, args.target)}")
+        except ValueError as exc:
+            print(f"Не записано: {exc}")
+            return 1
+        return 0
+
+    if args.cmd == "unmatched":
+        from . import aliases
+        from .bot import ModelCache
+
+        conn = db.connect(Path(s.db_path))
+        model, _ = ModelCache().get(conn)
+        rows = aliases.unmatched(conn, model)
+        if not rows:
+            print("Все команды из линии найдены в истории.")
+        for team, hint in rows:
+            print(f"{team}: " + (f"похожие — {', '.join(hint)}" if hint else "похожих нет (возможно, не Tier 1–2 или новая команда)"))
+        if rows:
+            print('Связать: bk alias "Название в линии" "Название в OpenDota"')
         return 0
 
     if args.cmd == "export":

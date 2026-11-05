@@ -17,11 +17,21 @@ from . import rating
 STOP_WORDS = {"team", "esports", "esport", "gaming", "club", "the", "e-sports", "gg"}
 
 
-def normalize(name: str) -> str:
+# синонимы из справочника (bk alias): нормализованное название в линии → в истории; заполняет aliases.load
+ALIASES: dict[str, str] = {}
+
+
+def normalize_raw(name: str) -> str:
     """«Team Spirit» → «spirit», «Tundra Esports» → «tundra», «PARIVISION» → «parivision»."""
     words = re.findall(r"[a-z0-9а-яё]+", (name or "").casefold())
     core = [w for w in words if w not in STOP_WORDS]
     return "".join(core or words)
+
+
+def normalize(name: str) -> str:
+    """Нормализованное название с учётом справочника синонимов."""
+    key = normalize_raw(name)
+    return ALIASES.get(key, key)
 
 
 def match_team(model, name: str) -> tuple[int, rating.TeamState] | None:

@@ -61,7 +61,9 @@ class ModelCache:
 
         history.ensure_schema(conn)
         conn.row_factory = None
-        from . import details
+        from . import aliases, details
+
+        aliases.load(conn)  # справочник синонимов меняется без переобучения
 
         details.ensure_schema(conn)
         key = conn.execute("SELECT (SELECT COUNT(*) FROM pro_maps), (SELECT MAX(match_id) FROM pro_maps), "
@@ -163,8 +165,9 @@ class Bot:
         if target is None and arg.isdigit() and 1 <= int(arg) <= len(items):
             target = items[int(arg) - 1]
         if target is None:
-            q = analysis.normalize(arg)
-            target = next((a for a in items if q and (q in analysis.normalize(a.match.team1) or q in analysis.normalize(a.match.team2))), None)
+            q = analysis.normalize_raw(arg)
+            target = next((a for a in items if q and any(q in f(t) for t in (a.match.team1, a.match.team2)
+                                                         for f in (analysis.normalize_raw, analysis.normalize))), None)
         if target is None:
             return "Не нашёл матч. Посмотрите номера в /today"
         a, m = target, target.match
@@ -183,7 +186,9 @@ class Bot:
                 lines.append("Главные факторы (+ за " + m.team1 + ", − за " + m.team2 + "):")
                 lines += [f"  {LABELS.get(n, n)}: {c:+.2f}" for n, _, c in top if abs(c) >= 0.01]
         else:
-            lines.append("Нашей оценки нет: одной из команд нет в истории Tier 1–2.")
+            missing = [t for t, st in ((m.team1, s1), (m.team2, s2)) if st is None]
+            lines.append(f"Нашей оценки нет: не нашёл в истории Tier 1–2 {', '.join(missing) or 'одну из команд'}. "
+                         "Если это переименованная команда, свяжите названия на Mac: bk unmatched, затем bk alias")
         lines.append("\nЛиния Oddin (коэфф. · вероятность БК без маржи):")
         for market in sorted(m.quotes, key=lambda k: (k != "match_winner", k)):
             parts = [f"{q.outcome} {q.price:.2f} · {_pct(q.fair_prob)}" for q in m.quotes[market].values()]
@@ -197,7 +202,7 @@ class Bot:
                 lines.append(f"⚠️ — модель расходится с рынком больше чем на {self.thresholds.max_gap:.0%}: скорее ошибается модель, ставки нет.")
             if not any(self.thresholds.ok(p) for p in a.picks):
                 lines.append("Ставки нет: перевес ниже порога.")
-        lines.append("\nРиски: модель видит результаты карт, форму, личные встречи, патч и стабильность состава; драфт пока не учитывается.")
+        lines.append("\nРиски: модель видит результаты карт, форму, личные встречи, патч и стабильность состава; героев до драфта не знает (после драфта бот пересчитает карту сам и пришлёт сигнал, если он есть).")
         return "\n".join(lines)
 
     def value(self) -> str:
