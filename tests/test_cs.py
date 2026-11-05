@@ -51,7 +51,7 @@ def history_pages(n=40):
 def test_sync_stops_at_known(tmp_path):
     conn = db.connect(tmp_path / "bk.sqlite3")
     ps = FakePS(history_pages())
-    added = cs.sync(conn, ps, 365, now=NOW.timestamp(), sleep=lambda *_: None)
+    added = cs.sync(conn, ps, 365, now=NOW.timestamp(), sleep=lambda *_: None, log=lambda *_: None)
     assert added == 80 and ps.calls == 3
     ps2 = FakePS(history_pages())
     assert cs.sync(conn, ps2, 365, now=NOW.timestamp(), sleep=lambda *_: None) == 0 and ps2.calls == 1
@@ -120,3 +120,11 @@ def test_bot_shows_cs_section(tmp_path):
     m = bot.handle(ME, "/match 1").text
     assert "(CS2)" in m and "только победу в матче" in m and "героев" not in m
     assert "CS2: Team Vitality" in bot.handle(ME, "/team Vitality")
+
+
+def test_sync_does_not_stop_on_undated_series(tmp_path):
+    conn = db.connect(tmp_path / "bk.sqlite3")
+    pages = history_pages()
+    pages[0] = [{"id": 1, "status": "canceled", "begin_at": None, "opponents": []}] + pages[0]
+    ps = FakePS(pages)
+    assert cs.sync(conn, ps, 365, now=NOW.timestamp(), sleep=lambda *_: None, log=lambda *_: None) == 80
