@@ -139,6 +139,9 @@ def _ts(iso: str | None) -> int | None:
 
 def find_series(conn: sqlite3.Connection, team1: str, team2: str, start_iso: str | None, created_iso: str) -> list[sqlite3.Row] | None:
     """Карты серии этих команд из OpenDota после начала матча (по возрастанию времени)."""
+    from . import aliases
+
+    aliases.load(conn)
     t1, t2 = normalize(team1), normalize(team2)
     start = _ts(start_iso) or _ts(created_iso) or 0
     conn.row_factory = sqlite3.Row
