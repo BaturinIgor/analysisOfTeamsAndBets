@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from dataclasses import dataclass, field
+from pathlib import Path
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -29,11 +31,20 @@ HELP = """Анализатор ставок Dota 2
 /model — насколько точна модель на последних 180 днях
 /sim — бумажные ставки: банк, ROI, CLV
 /settings — текущие пороги
+/export — файл xlsx (матчи, ставки, итоги) и CSV
 
 Коэффициенты: линия Oddin (на ней работает BetBoom), обновляется автоматически.
-Вероятности: рейтинг Elo + форма + личные встречи + патч + стабильность состава по картам Tier 1–2, обучено на истории. Драфт пока не учитывается."""
+Вероятности: рейтинг Elo + форма + личные встречи + патч + стабильность состава по картам Tier 1–2, обучено на истории.
+После драфта — ещё сила героев в патче и опыт игроков на них."""
 
-LATER = "Выгрузка в xlsx появится на следующем шаге."
+
+
+@dataclass
+class Reply:
+    """Ответ с файлами: текст и пути к документам для sendDocument."""
+
+    text: str
+    files: list[Path] = field(default_factory=list)
 
 
 class ModelCache:
@@ -93,12 +104,15 @@ def _team(name: str, st) -> str:
 
 class Bot:
     def __init__(self, conn: sqlite3.Connection, allowed_ids: tuple[int, ...], thresholds: Thresholds | None = None,
-                 tz: str = "Europe/Moscow", now=None, sim: simmod.SimSettings | None = None):
+                 tz: str = "Europe/Moscow", now=None, sim: simmod.SimSettings | None = None,
+                 export_dir: Path = Path("data/exports")):
         self.sim = sim or simmod.SimSettings()
         self.conn = conn
         self.allowed = set(allowed_ids)
         self.thresholds = thresholds or Thresholds()
         self.tz = ZoneInfo(tz)
+        self.tz_name = tz
+        self.export_dir = Path(export_dir)
         self.models = ModelCache()
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._last_list: list[str] = []  # fixture_id по номерам из /today
@@ -242,7 +256,18 @@ class Bot:
                 f"Симулятор: банк {c.bank:.0f}, стратегия {c.strategy} (сумма {c.stake:.0f} / {c.percent:.0%} банка / {c.kelly:.2f} Келли).\n"
                 "Меняются в .env: SIGNAL_MIN_EV, SIGNAL_MIN_PROB, SIGNAL_MIN_ODDS, SIGNAL_MAX_GAP, SIM_BANK, SIM_STRATEGY, SIM_STAKE, SIM_PERCENT, SIM_KELLY.")
 
-    def handle(self, user_id: int, text: str) -> str | None:
+    def export(self) -> Reply:
+        from . import export as ex
+
+        items, _ = self._analyses()
+        paths = ex.export(self.conn, items, self.thresholds, self.sim, self.export_dir, self.tz_name, self._now())
+        xlsx = [p for p in paths if p.suffix == ".xlsx"]
+        text = f"Выгрузка: {len(items)} матчей в линии, ставки симулятора и итоги. Файлы на Mac: {self.export_dir.resolve()}"
+        if not xlsx:
+            text += "\nxlsx не собран: нет библиотеки openpyxl. Установите: pip install -e . — пока отправляю CSV."
+        return Reply(text, xlsx or paths)
+
+    def handle(self, user_id: int, text: str) -> str | Reply | None:
         if user_id not in self.allowed:
             return None  # чужим не отвечаем
         cmd, _, arg = (text or "").strip().partition(" ")
@@ -268,7 +293,7 @@ class Bot:
             if cmd == "/sim":
                 return simmod.report(self.conn, self.sim)
             if cmd == "/export":
-                return LATER
+                return self.export()
         except Exception as exc:  # бот не должен падать из-за одной команды
             return f"Ошибка: {exc}"
         return "Не знаю такой команды. /help"
@@ -293,6 +318,7 @@ COMMANDS = [
     ("model", "точность модели"),
     ("sim", "симулятор бумажных ставок"),
     ("settings", "пороги сигнала"),
+    ("export", "выгрузка в xlsx и csv"),
     ("help", "справка"),
 ]
 
@@ -305,6 +331,15 @@ def send_message(client: httpx.Client, token: str, chat_id: int, text: str) -> b
         except httpx.HTTPError:
             ok = False
     return ok
+
+
+def send_document(client: httpx.Client, token: str, chat_id: int, path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            resp = client.post(f"{API}/bot{token}/sendDocument", data={"chat_id": str(chat_id)}, files={"document": (path.name, f)})
+        return resp.status_code == 200
+    except (httpx.HTTPError, OSError):
+        return False
 
 
 def make_telegram_client(proxy: str = "") -> httpx.Client:
@@ -358,8 +393,13 @@ def run_polling(token: str, bot: Bot, client: httpx.Client | None = None, log=pr
                 if user:
                     log(f"Сообщение от чужого ID {user} пропущено")
                 continue
-            for part in chunks(reply):
+            files = reply.files if isinstance(reply, Reply) else []
+            text = reply.text if isinstance(reply, Reply) else reply
+            for part in chunks(text):
                 try:
                     client.post(f"{base}/sendMessage", json={"chat_id": msg["chat"]["id"], "text": part, "disable_web_page_preview": True})
                 except httpx.HTTPError as exc:
                     log(f"Не отправилось: {exc}")
+            for path in files:
+                if not send_document(client, token, msg["chat"]["id"], path):
+                    log(f"Файл не отправился: {path}")

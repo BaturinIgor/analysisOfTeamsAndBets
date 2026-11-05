@@ -297,7 +297,8 @@ def run_bot(s: Settings, collect: bool = True, interval: int = 600) -> int:
             run_collector(s, db.connect(Path(s.db_path)), interval, log=lambda m: print(f"[линия] {m}"), simulate=True, notify=notify)
 
         threading.Thread(target=collector, daemon=True).start()
-    bot = Bot(db.connect(Path(s.db_path)), s.telegram_allowed_ids, s.thresholds(), s.timezone, sim=s.sim())
+    bot = Bot(db.connect(Path(s.db_path)), s.telegram_allowed_ids, s.thresholds(), s.timezone, sim=s.sim(),
+              export_dir=Path(s.db_path).parent / "exports")
     status = check_telegram(s.telegram_bot_token, tg)
     print(f"Telegram{' через прокси' if s.telegram_proxy else ''}: {status}")
     print("Бот запущен. Напишите ему /today в Telegram. Остановить: Ctrl+C")
@@ -600,6 +601,9 @@ def main(argv: list[str] | None = None) -> int:
     p_sr = sub.add_parser("sim-reset", help="удалить все бумажные ставки и начать симулятор заново")
     p_sr.add_argument("--yes", action="store_true", help="подтверждение")
 
+    p_ex = sub.add_parser("export", help="выгрузка в xlsx (матчи, ставки, итоги) и CSV")
+    p_ex.add_argument("--out", type=Path, default=None, help="папка для файлов (по умолчанию data/exports)")
+
     p_bot = sub.add_parser("bot", help="запустить Telegram-бота (и сбор коэффициентов в фоне)")
     p_bot.add_argument("--no-collect", action="store_true", help="не собирать коэффициенты в этом же процессе")
     p_bot.add_argument("--interval", type=int, default=600, help="минимальная пауза между снимками линии, секунд")
@@ -700,6 +704,17 @@ def main(argv: list[str] | None = None) -> int:
         conn.execute("DELETE FROM paper_bets")
         conn.commit()
         print(f"Удалено бумажных ставок: {n}. Симулятор начнётся заново.")
+        return 0
+
+    if args.cmd == "export":
+        from .bot import Bot
+
+        out = args.out or Path(s.db_path).parent / "exports"
+        b = Bot(db.connect(Path(s.db_path)), (0,), s.thresholds(), s.timezone, sim=s.sim(), export_dir=out)
+        r = b.export()
+        print(r.text)
+        for p in r.files:
+            print(f"  {p}")
         return 0
 
     if args.cmd == "bot":

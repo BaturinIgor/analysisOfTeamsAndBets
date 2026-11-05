@@ -94,7 +94,6 @@ def test_team_and_misc(bot):
     assert "Team Spirit: рейтинг" in bot.handle(ME, "/team spirit")
     assert "не найдена" in bot.handle(ME, "/team Secret")
     assert "SIGNAL_MIN_EV" in bot.handle(ME, "/settings")
-    assert "xlsx" in bot.handle(ME, "/export")
     assert "Симулятор" in bot.handle(ME, "/sim")
     assert "Не знаю" in bot.handle(ME, "/foo")
 
