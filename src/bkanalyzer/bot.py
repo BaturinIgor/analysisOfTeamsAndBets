@@ -26,32 +26,36 @@ HELP = """Анализатор ставок Dota 2
 /match N — подробный разбор матча N из /today
 /value — сигналы: перевес (EV) не меньше порога
 /team название — рейтинг команды
+/model — насколько точна модель на последних 180 днях
 /sim — бумажные ставки: банк, ROI, CLV
 /settings — текущие пороги
 
 Коэффициенты: линия Oddin (на ней работает BetBoom), обновляется автоматически.
-Вероятности: рейтинг Elo по картам Tier 1–2. Форма, патч, состав и драфт пока не учитываются."""
+Вероятности: рейтинг Elo + форма + личные встречи по картам Tier 1–2, обучено на истории. Патч, состав и драфт пока не учитываются."""
 
 LATER = "Выгрузка в xlsx появится на следующем шаге."
 
 
 class ModelCache:
-    """Рейтинг пересчитывается, только когда в базе появились новые карты."""
+    """Модель переобучается, только когда в базе появились новые карты."""
 
-    def __init__(self):
+    def __init__(self, eval_days: int = 180):
         self._key = None
-        self._model: rating.EloModel | None = None
+        self._model = None
+        self.report = None
+        self.eval_days = eval_days
 
-    def get(self, conn: sqlite3.Connection) -> tuple[rating.EloModel, int]:
-        from . import history
+    def get(self, conn: sqlite3.Connection):
+        from . import history, model as mm
 
         history.ensure_schema(conn)
         conn.row_factory = None
         key = conn.execute("SELECT COUNT(*), MAX(match_id) FROM pro_maps").fetchone()
         if key != self._key or self._model is None:
-            maps = history.tier_maps(conn)
+            maps = [dict(r) for r in history.tier_maps(conn)]
             conn.row_factory = None
-            self._model, _ = rating.fit(maps)
+            since = (maps[-1]["start_time"] - self.eval_days * 86400) if maps else 0
+            self._model, self.report = mm.train(maps, since)
             self._key = key
         return self._model, key[0] or 0
 
@@ -145,6 +149,12 @@ class Bot:
         ]
         if a.p_map is not None:
             lines.append(f"Наша вероятность: карта {a.p_map:.0%} / {1 - a.p_map:.0%}; серия {a.p_series:.0%} / {1 - a.p_series:.0%}")
+            if a.factors:
+                from .model import LABELS
+
+                top = sorted(a.factors, key=lambda f: -abs(f[2]))[:4]
+                lines.append("Главные факторы (+ за " + m.team1 + ", − за " + m.team2 + "):")
+                lines += [f"  {LABELS.get(n, n)}: {c:+.2f}" for n, _, c in top if abs(c) >= 0.01]
         else:
             lines.append("Нашей оценки нет: одной из команд нет в истории Tier 1–2.")
         lines.append("\nЛиния Oddin (коэфф. · вероятность БК без маржи):")
@@ -160,7 +170,7 @@ class Bot:
                 lines.append(f"⚠️ — модель расходится с рынком больше чем на {self.thresholds.max_gap:.0%}: скорее ошибается модель, ставки нет.")
             if not any(self.thresholds.ok(p) for p in a.picks):
                 lines.append("Ставки нет: перевес ниже порога.")
-        lines.append("\nРиски: модель видит только результаты карт; форма, патч, замены и драфт пока не учитываются.")
+        lines.append("\nРиски: модель видит результаты карт, форму и личные встречи; патч, замены и драфт пока не учитываются.")
         return "\n".join(lines)
 
     def value(self) -> str:
@@ -186,6 +196,22 @@ class Bot:
         ranked = sorted((s.rating for s in model.teams.values() if s.games >= 20), reverse=True)
         place = sum(1 for r in ranked if r > st.rating) + 1
         return f"{st.name}: рейтинг {st.rating:.0f}, карт в истории {st.games}, место {place} из {len(ranked)} (команды с 20+ картами)"
+
+    def model_report(self) -> str:
+        from .model import FEATURES, LABELS
+
+        _, maps = self.models.get(self.conn)
+        r = self.models.report
+        if not maps or r is None or not r.model_eval.n:
+            return "Мало истории для проверки. Запустите bk sync-matches"
+        lines = [f"Проверка на последних {self.models.eval_days} днях ({r.model_eval.n} карт, обучение на {r.train} более ранних):",
+                 f"  только рейтинг: точность {r.elo_eval.accuracy:.1%}, Brier {r.elo_eval.brier:.4f}, log-loss {r.elo_eval.log_loss:.4f}",
+                 f"  модель:         точность {r.model_eval.accuracy:.1%}, Brier {r.model_eval.brier:.4f}, log-loss {r.model_eval.log_loss:.4f}",
+                 "  (меньше Brier и log-loss — лучше; монетка: 0.25 и 0.693)",
+                 "Калибровка модели (прогноз фаворита → факт):"]
+        lines += [f"  {rng}: карт {n}, прогноз {p:.0%}, факт {y:.0%}" for rng, n, p, y in r.model_eval.buckets]
+        lines.append(f"Elo: K={r.k:.0f}, полураспад {r.half_life:.0f} дн. Веса: " + ", ".join(f"{LABELS[f]} {w:+.2f}" for f, w in zip(FEATURES, r.weights)))
+        return "\n".join(lines)
 
     def settings(self) -> str:
         t = self.thresholds
@@ -214,6 +240,8 @@ class Bot:
                 return self.value()
             if cmd == "/team":
                 return self.team(arg)
+            if cmd == "/model":
+                return self.model_report()
             if cmd == "/settings":
                 return self.settings()
             if cmd == "/sim":
@@ -241,6 +269,7 @@ COMMANDS = [
     ("match", "разбор матча: /match N"),
     ("value", "сигналы с перевесом"),
     ("team", "рейтинг команды"),
+    ("model", "точность модели"),
     ("sim", "симулятор бумажных ставок"),
     ("settings", "пороги сигнала"),
     ("help", "справка"),

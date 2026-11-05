@@ -24,7 +24,7 @@ def normalize(name: str) -> str:
     return "".join(core or words)
 
 
-def match_team(model: rating.EloModel, name: str) -> tuple[int, rating.TeamState] | None:
+def match_team(model, name: str) -> tuple[int, rating.TeamState] | None:
     """Ищет команду из линии в истории OpenDota по нормализованному названию."""
     key = normalize(name)
     if not key:
@@ -154,15 +154,18 @@ class Analysis:
     p_map: float | None = None
     p_series: float | None = None
     picks: list[Pick] = field(default_factory=list)
+    factors: list[tuple[str, float, float]] = field(default_factory=list)
 
 
-def analyze(bm: BoardMatch, model: rating.EloModel, now: int | None = None) -> Analysis:
+def analyze(bm: BoardMatch, model, now: int | None = None) -> Analysis:
     now = now or int(time.time())
     a, b = match_team(model, bm.team1), match_team(model, bm.team2)
     res = Analysis(bm, (a[1] if a else None, b[1] if b else None))
     if not (a and b) or a[0] == b[0]:
         return res
     p = model.predict(a[0], b[0], now)
+    if hasattr(model, "explain"):
+        res.factors = model.explain(a[0], b[0], now)
     won, lost = bm.maps_score
     res.p_map = p
     res.p_series = series_from_score(p, bm.best_of, won, lost)
