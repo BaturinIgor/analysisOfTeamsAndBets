@@ -104,6 +104,22 @@ def message(bm: BoardMatch, p: float, pick: Pick | None, placed: bool) -> str:
     return f"{head}\n✅ {market_label(pick.market)}: {pick.team} @ {pick.price:.2f}, EV {pick.ev:+.1%} — {tail}"
 
 
+def roster_note(conn, model, bm: BoardMatch, d: LiveDraft, team1_radiant: bool, now: int) -> str:
+    """Предупреждение, если в этой карте играет не основной состав."""
+    from . import news
+
+    notes = []
+    for team, picks in ((bm.team1, d.picks_r if team1_radiant else d.picks_d), (bm.team2, d.picks_d if team1_radiant else d.picks_r)):
+        found = analysis.match_team(model, team)
+        lineup = frozenset(acc for acc, _ in picks if acc)
+        if not found or len(lineup) < 5:
+            continue
+        r = news.roster_risk(conn, found[0], now, lineup)
+        if r:
+            notes.append("⚠️ " + r.text(team))
+    return ("\n" + "\n".join(notes)) if notes else ""
+
+
 def best_signal(picks: list[Pick], thresholds: Thresholds) -> Pick | None:
     good = [p for p in picks if thresholds.ok(p)]
     return max(good, key=lambda p: p.ev) if good else None

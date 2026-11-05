@@ -52,6 +52,10 @@ class OpenDota:
             raise SourceError(f"OpenDota explorer: {data['err']}")
         return (data or {}).get("rows") or []
 
+    def pro_players(self) -> list[dict]:
+        """Все про-игроки: account_id, name, team_id."""
+        return self._get("/proPlayers")
+
     def patches(self) -> list[dict]:
         """Список патчей с датами выхода: [{"name": "7.37", "date": "..."}]."""
         return self._get("/constants/patch")
