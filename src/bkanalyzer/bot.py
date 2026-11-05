@@ -24,6 +24,11 @@ MAX_LEN = 4000
 
 HELP = """Анализатор ставок Dota 2
 
+Пользуйтесь кнопками внизу экрана. Под списком матчей — кнопки разбора (🔎) и новостей (📰).
+Можно просто написать название команды — покажу её матч или рейтинг.
+
+Те же действия командами:
+
 /today — матчи в линии и наша оценка
 /live — матчи в эфире
 /match N — подробный разбор матча N из /today
@@ -43,10 +48,29 @@ HELP = """Анализатор ставок Dota 2
 
 @dataclass
 class Reply:
-    """Ответ с файлами: текст и пути к документам для sendDocument."""
+    """Ответ бота: текст, файлы (sendDocument), кнопки под сообщением и/или меню внизу экрана."""
 
     text: str
     files: list[Path] = field(default_factory=list)
+    buttons: list[list[tuple[str, str]]] = field(default_factory=list)  # [(надпись, callback_data)]
+    menu: bool = False
+
+    def __contains__(self, item: str) -> bool:
+        return item in self.text
+
+
+# меню внизу экрана: надпись кнопки → команда
+MENU = [["📋 Матчи", "🔴 Эфир"], ["✅ Сигналы", "📊 Симулятор"], ["📈 Модель", "📁 Выгрузка"], ["⚙️ Настройки", "❓ Помощь"]]
+MENU_CMD = {"📋 Матчи": "/today", "🔴 Эфир": "/live", "✅ Сигналы": "/value", "📊 Симулятор": "/sim",
+            "📈 Модель": "/model", "📁 Выгрузка": "/export", "⚙️ Настройки": "/settings", "❓ Помощь": "/help"}
+
+
+def reply_markup(reply: Reply) -> dict | None:
+    if reply.buttons:
+        return {"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in row] for row in reply.buttons]}
+    if reply.menu:
+        return {"keyboard": [[{"text": t} for t in row] for row in MENU], "resize_keyboard": True, "is_persistent": True}
+    return None
 
 
 class ModelCache:
@@ -145,7 +169,7 @@ class Bot:
         return f"{head}\n   П1/П2 {odds}; {ours}{sig}"
 
     # --- команды ------------------------------------------------------------
-    def today(self, live_only: bool = False) -> str:
+    def today(self, live_only: bool = False) -> str | Reply:
         items, maps = self._analyses(live_only)
         if not items:
             return "Сейчас в эфире матчей Dota нет." if live_only else "В линии нет матчей Dota. Проверьте, что запущен сбор: bk collect-odds"
@@ -154,11 +178,16 @@ class Bot:
         lines += [self._line(i, a) for i, a in enumerate(items, 1)]
         if not maps:
             lines.append("\nИстории матчей нет — оценки не будет. Запустите один раз: bk sync-matches")
-        lines.append("\nПодробно: /match N")
-        return "\n".join(lines)
+        lines.append("\nПодробно — кнопки ниже (🔎 разбор, 📰 состав и новости).")
+        buttons = []
+        for i, a in enumerate(items[:20], 1):
+            fid = a.match.fixture_id
+            label = f"{i}. {a.match.team1} — {a.match.team2}"
+            buttons.append([(label[:40], f"m:{fid}"), ("📰", f"n:{fid}")])
+        return Reply("\n".join(lines), buttons=buttons)
 
     def _find(self, items: list[Analysis], arg: str) -> Analysis | None:
-        target = None
+        target = next((a for a in items if a.match.fixture_id == arg), None)  # из кнопки
         if arg.isdigit() and self._last_list and 1 <= int(arg) <= len(self._last_list):
             fid = self._last_list[int(arg) - 1]
             target = next((a for a in items if a.match.fixture_id == fid), None)
@@ -207,9 +236,12 @@ class Bot:
                 lines.append("⚠️ " + r.text(team))
             lines += news.news_block(team, news.team_news(self.conn, self.news_client, team, now))
             lines.append("")
+        if target:
+            fid = target.match.fixture_id
+            return Reply("\n".join(lines).strip(), buttons=[[("🔎 Разбор матча", f"m:{fid}"), ("🔄 Обновить", f"n:{fid}")]])
         return "\n".join(lines).strip()
 
-    def match(self, arg: str) -> str:
+    def match(self, arg: str) -> str | Reply:
         items, _ = self._analyses()
         if not items:
             return "В линии нет матчей Dota."
@@ -251,8 +283,9 @@ class Bot:
         risk = self.risks(m, int(self._now().timestamp()))
         lines.append("\nРиски:" + ("\n" + "\n".join(risk) if risk else " по составу и новостям за 7 дней ничего не нашёл."))
         lines.append("Модель не знает героев до драфта (после драфта бот пересчитает карту сам и пришлёт сигнал, если он есть). "
-                     "Подробнее о новостях: /news " + m.team1)
-        return "\n".join(lines)
+                     "Подробнее — кнопка «Новости» ниже.")
+        fid = m.fixture_id
+        return Reply("\n".join(lines), buttons=[[("📰 Состав и новости", f"n:{fid}"), ("🔄 Обновить", f"m:{fid}")]])
 
     def value(self) -> str:
         items, _ = self._analyses()
@@ -334,9 +367,13 @@ class Bot:
         cmd, _, arg = (text or "").strip().partition(" ")
         cmd = cmd.split("@")[0].lower()
         arg = arg.strip()
+        if cmd in MENU_CMD:
+            cmd, arg = MENU_CMD[cmd], ""
+        elif (text or "").strip() in MENU_CMD:
+            cmd, arg = MENU_CMD[text.strip()], ""
         try:
             if cmd in ("/start", "/help"):
-                return HELP
+                return Reply(HELP, menu=True)
             if cmd == "/today":
                 return self.today()
             if cmd == "/live":
@@ -357,9 +394,30 @@ class Bot:
                 return simmod.report(self.conn, self.sim)
             if cmd == "/export":
                 return self.export()
+            if not cmd.startswith("/"):
+                # просто текст: ищем матч в линии с такой командой, иначе — рейтинг команды
+                query = (text or "").strip()
+                items, _ = self._analyses()
+                if items and self._find(items, query) and not query.isdigit():
+                    return self.match(query)
+                return self.team(query)
         except Exception as exc:  # бот не должен падать из-за одной команды
             return f"Ошибка: {exc}"
-        return "Не знаю такой команды. /help"
+        return "Не знаю такой команды. Нажмите ❓ Помощь"
+
+    def callback(self, user_id: int, data: str) -> str | Reply | None:
+        """Нажатие кнопки под сообщением: m:<матч> — разбор, n:<матч> — состав и новости."""
+        if user_id not in self.allowed:
+            return None
+        kind, _, fid = (data or "").partition(":")
+        try:
+            if kind == "m":
+                return self.match(fid)
+            if kind == "n":
+                return self.news(fid)
+        except Exception as exc:
+            return f"Ошибка: {exc}"
+        return None
 
 
 def chunks(text: str, size: int = MAX_LEN) -> list[str]:
@@ -427,6 +485,24 @@ class Outbox:
         return sent
 
 
+def send_reply(client: httpx.Client, token: str, chat_id: int, reply: str | Reply, log=print) -> None:
+    """Текст частями; кнопки — к последней части; затем файлы."""
+    r = reply if isinstance(reply, Reply) else Reply(reply)
+    parts = chunks(r.text) or [""]
+    markup = reply_markup(r)
+    for i, part in enumerate(parts):
+        body = {"chat_id": chat_id, "text": part, "disable_web_page_preview": True}
+        if markup and i == len(parts) - 1:
+            body["reply_markup"] = markup
+        try:
+            client.post(f"{API}/bot{token}/sendMessage", json=body)
+        except httpx.HTTPError as exc:
+            log(f"Не отправилось: {exc}")
+    for path in r.files:
+        if not send_document(client, token, chat_id, path):
+            log(f"Файл не отправился: {path}")
+
+
 def send_document(client: httpx.Client, token: str, chat_id: int, path: Path) -> bool:
     try:
         with open(path, "rb") as f:
@@ -487,20 +563,22 @@ def run_polling(token: str, bot: Bot, client: httpx.Client | None = None, log=pr
             continue
         for upd in data.get("result", []):
             offset = upd["update_id"] + 1
-            msg = upd.get("message") or {}
-            user = (msg.get("from") or {}).get("id")
-            reply = bot.handle(user, msg.get("text", "")) if user else None
+            cq = upd.get("callback_query")
+            if cq:
+                try:  # убираем «часики» на кнопке
+                    client.post(f"{base}/answerCallbackQuery", json={"callback_query_id": cq.get("id")})
+                except httpx.HTTPError:
+                    pass
+                user = (cq.get("from") or {}).get("id")
+                chat = ((cq.get("message") or {}).get("chat") or {}).get("id") or user
+                reply = bot.callback(user, cq.get("data", "")) if user else None
+            else:
+                msg = upd.get("message") or {}
+                user = (msg.get("from") or {}).get("id")
+                chat = (msg.get("chat") or {}).get("id")
+                reply = bot.handle(user, msg.get("text", "")) if user else None
             if reply is None:
-                if user:
+                if user and user not in bot.allowed:
                     log(f"Сообщение от чужого ID {user} пропущено")
                 continue
-            files = reply.files if isinstance(reply, Reply) else []
-            text = reply.text if isinstance(reply, Reply) else reply
-            for part in chunks(text):
-                try:
-                    client.post(f"{base}/sendMessage", json={"chat_id": msg["chat"]["id"], "text": part, "disable_web_page_preview": True})
-                except httpx.HTTPError as exc:
-                    log(f"Не отправилось: {exc}")
-            for path in files:
-                if not send_document(client, token, msg["chat"]["id"], path):
-                    log(f"Файл не отправился: {path}")
+            send_reply(client, token, chat, reply, log)
