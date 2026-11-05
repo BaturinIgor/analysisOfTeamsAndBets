@@ -113,3 +113,13 @@ def lineups(conn: sqlite3.Connection) -> dict[int, tuple[frozenset, frozenset]]:
         r, d = out.setdefault(mid, (set(), set()))
         (r if rad else d).add(acc)
     return {k: (frozenset(r), frozenset(d)) for k, (r, d) in out.items()}
+
+
+def picks(conn: sqlite3.Connection) -> dict[int, tuple[list, list]]:
+    """match_id -> ([(игрок, герой)] radiant, [(игрок, герой)] dire)."""
+    ensure_schema(conn)
+    out: dict[int, tuple[list, list]] = {}
+    for mid, acc, rad, hero in conn.execute("SELECT match_id, account_id, is_radiant, hero_id FROM map_players ORDER BY match_id"):
+        r, d = out.setdefault(mid, ([], []))
+        (r if rad else d).append((acc, hero))
+    return out
