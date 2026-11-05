@@ -187,3 +187,23 @@ def test_closed_market_hidden(tmp_path):
     # матч, которого нет в последнем снимке, пропадает
     db.upsert_matches(conn, [{"match_id": "z", "team1": "C", "team2": "D"}], source="oddiwire", updated_at="2026-11-04T20:20:00+00:00")
     assert [b.fixture_id for b in analysis.load_board(conn, now=datetime(2026, 11, 4, 20, 25, tzinfo=timezone.utc))] == ["z"]
+
+
+def test_outbox_keeps_messages_until_telegram_is_back():
+    from bkanalyzer.bot import Outbox
+
+    state = {"down": True, "sent": []}
+
+    def handler(req: httpx.Request):
+        if state["down"]:
+            raise httpx.ConnectError("Connection reset by peer")
+        state["sent"].append(req.content)
+        return httpx.Response(200, json={"ok": True})
+
+    box = Outbox(httpx.Client(transport=httpx.MockTransport(handler)), "T", (ME,))
+    box.add("ставка 1")
+    box.add("ставка 2")
+    assert len(box.pending) == 2 and not state["sent"]
+    state["down"] = False
+    assert box.flush() == 2 and not box.pending
+    assert "ставка 1" in state["sent"][0].decode() and "ставка 2" in state["sent"][1].decode()

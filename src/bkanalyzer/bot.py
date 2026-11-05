@@ -329,13 +329,43 @@ COMMANDS = [
 
 
 def send_message(client: httpx.Client, token: str, chat_id: int, text: str) -> bool:
-    ok = True
     for part in chunks(text):
         try:
-            client.post(f"{API}/bot{token}/sendMessage", json={"chat_id": chat_id, "text": part, "disable_web_page_preview": True})
+            resp = client.post(f"{API}/bot{token}/sendMessage", json={"chat_id": chat_id, "text": part, "disable_web_page_preview": True})
         except httpx.HTTPError:
-            ok = False
-    return ok
+            return False
+        if resp.status_code >= 500 or resp.status_code == 429:
+            return False  # временная ошибка Telegram — попробуем позже
+    return True
+
+
+class Outbox:
+    """Уведомления, которые не ушли из-за обрыва связи с Telegram: отправляются, когда связь вернётся."""
+
+    def __init__(self, client: httpx.Client, token: str, chats, limit: int = 200):
+        import threading
+
+        self.client, self.token, self.chats, self.limit = client, token, tuple(chats), limit
+        self.pending: list[tuple[int, str]] = []
+        self._lock = threading.Lock()
+
+    def add(self, text: str) -> None:
+        with self._lock:
+            self.pending += [(c, text) for c in self.chats]
+            del self.pending[:-self.limit]
+        self.flush()
+
+    def flush(self) -> int:
+        """Отправляет по порядку; на первой неудаче останавливается. Возвращает число отправленных."""
+        sent = 0
+        with self._lock:
+            while self.pending:
+                chat, text = self.pending[0]
+                if not send_message(self.client, self.token, chat, text):
+                    break
+                self.pending.pop(0)
+                sent += 1
+        return sent
 
 
 def send_document(client: httpx.Client, token: str, chat_id: int, path: Path) -> bool:
@@ -362,7 +392,8 @@ def check_telegram(token: str, client: httpx.Client) -> str:
     return f"ok, бот @{data['result'].get('username')}"
 
 
-def run_polling(token: str, bot: Bot, client: httpx.Client | None = None, log=print, stop=lambda: False, sleep=time.sleep) -> None:
+def run_polling(token: str, bot: Bot, client: httpx.Client | None = None, log=print, stop=lambda: False, sleep=time.sleep,
+                outbox: Outbox | None = None) -> None:
     client = client or make_telegram_client()
     base = f"{API}/bot{token}"
     try:
@@ -385,6 +416,10 @@ def run_polling(token: str, bot: Bot, client: httpx.Client | None = None, log=pr
         if fails:
             log("Связь с Telegram восстановлена")
             fails = 0
+        if outbox is not None and outbox.pending:
+            n = outbox.flush()
+            if n:
+                log(f"Доставлено отложенных уведомлений: {n}")
         if not data.get("ok"):
             log(f"Telegram: {data.get('description')}")
             sleep(5)

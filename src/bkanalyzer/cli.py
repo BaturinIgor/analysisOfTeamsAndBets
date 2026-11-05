@@ -242,10 +242,12 @@ def run_collector(s: Settings, conn, interval: int = 600, maps: bool = True, onc
     while not stop():
         pause = float(interval)
         try:
+            before, limit = ow.budget()
+            n = collect_oddiwire_once(conn, ow, maps=maps, max_calls=max(0, limit - before), log=log)
             used, limit = ow.budget()
-            n = collect_oddiwire_once(conn, ow, maps=maps, max_calls=max(0, limit - used), log=log)
-            used, limit = ow.budget()
-            pause = next_pause(used, limit, min_interval=interval)
+            # сколько запросов реально ушло на снимок (после полуночи UTC счётчик обнуляется)
+            spent = used - before if used >= before else used
+            pause = next_pause(used, limit, min_interval=interval, per_snapshot=max(1, spent))
             log(f"{time.strftime('%H:%M:%S')} сохранено {n}; квота {used}/{limit}; следующий снимок через {pause / 60:.0f} мин")
             if simulate:
                 simulate_step(s, conn, models, od, last_sync, notify, log)
@@ -283,18 +285,15 @@ def run_bot(s: Settings, collect: bool = True, interval: int = 600) -> int:
     if not s.telegram_allowed_ids:
         print("Нет TELEGRAM_ALLOWED_IDS в .env — бот никому не ответит")
         return 1
-    from .bot import check_telegram, make_telegram_client, send_message
+    from .bot import Outbox, check_telegram, make_telegram_client
 
     tg = make_telegram_client(s.telegram_proxy)
+    outbox = None
     if collect:
-        notify_client = make_telegram_client(s.telegram_proxy)
-
-        def notify(text: str) -> None:
-            for chat in s.telegram_allowed_ids:
-                send_message(notify_client, s.telegram_bot_token, chat, text)
+        outbox = Outbox(make_telegram_client(s.telegram_proxy), s.telegram_bot_token, s.telegram_allowed_ids)
 
         def collector():
-            run_collector(s, db.connect(Path(s.db_path)), interval, log=lambda m: print(f"[линия] {m}"), simulate=True, notify=notify)
+            run_collector(s, db.connect(Path(s.db_path)), interval, log=lambda m: print(f"[линия] {m}"), simulate=True, notify=outbox.add)
 
         threading.Thread(target=collector, daemon=True).start()
     bot = Bot(db.connect(Path(s.db_path)), s.telegram_allowed_ids, s.thresholds(), s.timezone, sim=s.sim(),
@@ -303,7 +302,7 @@ def run_bot(s: Settings, collect: bool = True, interval: int = 600) -> int:
     print(f"Telegram{' через прокси' if s.telegram_proxy else ''}: {status}")
     print("Бот запущен. Напишите ему /today в Telegram. Остановить: Ctrl+C")
     try:
-        run_polling(s.telegram_bot_token, bot, tg)
+        run_polling(s.telegram_bot_token, bot, tg, outbox=outbox)
     except KeyboardInterrupt:
         pass
     return 0
