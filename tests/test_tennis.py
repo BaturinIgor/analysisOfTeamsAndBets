@@ -176,3 +176,17 @@ def test_backtest_against_closing_odds(tmp_path):
     text = tennis.backtest(conn, eval_days=60, min_games=5)
     assert "Pinnacle:" in text and "наша модель" in text and "ставок" in text
     assert "    3%     10%" in text
+
+
+def test_tennis_bets_are_silent(tmp_path, monkeypatch):
+    from bkanalyzer.cli import simulate_step
+
+    conn = seeded(tmp_path)
+    orig = analysis.load_board
+    monkeypatch.setattr(analysis, "load_board", lambda c, **kw: orig(c, **{**kw, "now": NOW}))
+    sent = []
+    s = Settings(pinnwire_api_key="k", signal_max_gap=0.5, sim_experiments="")
+    simulate_step(s, conn, ModelCache(), notify=sent.append, log=lambda *_: None)
+    bets = conn.execute("SELECT mode FROM paper_bets").fetchall()
+    assert bets and all(m == "ten_prematch" for (m,) in bets)  # статистика ведётся
+    assert sent == []  # а в Telegram ничего

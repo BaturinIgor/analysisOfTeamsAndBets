@@ -266,9 +266,11 @@ def simulate_step(s: Settings, conn, models, od=None, last_sync: list | None = N
         if g_maps:
             analyses += [analysis.analyze(m, g_model, now) for m in analysis.load_board(conn, game=game)]
     cfg = s.sim()
+    from .games import by_mode
+
     for b in sim.place_bets(conn, analyses, s.thresholds(), cfg):
         log("  " + sim.placed_message(b))
-        if notify:
+        if notify and by_mode(b["mode"]).notify:
             notify(sim.placed_message(b))
     for e in cfg.experiments:  # эксперименты: свои пороги на тех же коэффициентах, без уведомлений
         for b in sim.place_bets(conn, analyses, e.thresholds, e):
@@ -281,7 +283,9 @@ def simulate_step(s: Settings, conn, models, od=None, last_sync: list | None = N
     done = [b for b in done if ":" not in b["strategy"]]
     for text in sim.settled_messages([b for b in done if b["mode"] in sim.QUIET_MODES]):
         log("  на заметку: " + text)
-    for text in sim.settled_messages([b for b in done if b["mode"] not in sim.QUIET_MODES]):
+    for text in sim.settled_messages([b for b in done if b["mode"] not in sim.QUIET_MODES and not by_mode(b["mode"]).notify]):
+        log("  без уведомления: " + text)
+    for text in sim.settled_messages([b for b in done if b["mode"] not in sim.QUIET_MODES and by_mode(b["mode"]).notify]):
         log("  " + text)
         if notify:
             notify(text)
