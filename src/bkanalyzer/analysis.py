@@ -139,6 +139,7 @@ class BoardMatch:
     quotes: dict[str, dict[str, Quote]] = field(default_factory=dict)  # market -> outcome -> quote
     fmt_hint: int | None = None  # формат по прошлым сериям этого турнира в истории
     game: str = "dota2"
+    cond: str | None = None      # условия матча для модели: покрытие в теннисе
 
     @property
     def draw_outcome(self) -> str | None:
@@ -190,6 +191,11 @@ def load_board(conn: sqlite3.Connection, since_hours: float = 6, now: datetime |
     ).fetchall()
     out = []
     hints = format_hints(conn, int(now.timestamp()), table=game.maps_table)
+    surfaces = None
+    if game.key == "tennis":
+        from . import tennis
+
+        surfaces = tennis.surface_hints(conn, int(now.timestamp()))
     for mid, t1, t2, start, tour, score, seen in matches:
         open_markets = {m for (m,) in conn.execute(
             "SELECT market FROM feed_markets WHERE source=? AND fixture_id=? AND last_seen>=?", (src, mid, seen))}
@@ -199,7 +205,12 @@ def load_board(conn: sqlite3.Connection, since_hours: float = 6, now: datetime |
                WHERE source=? AND fixture_id=? ORDER BY id""",
             (src, mid),
         ).fetchall()
-        bm = BoardMatch(mid, t1, t2, start, tour, score, "prematch", fmt_hint=tournament_format(hints, tour), game=game.key)
+        bm = BoardMatch(mid, t1, t2, start, tour, score, "prematch", fmt_hint=1 if game.single else tournament_format(hints, tour),
+                        game=game.key)
+        if surfaces is not None:
+            from . import tennis
+
+            bm.cond = tennis.surface_for(tour, surfaces)
         last_time = ""
         for market, outcome, price, fair, taken, phase in rows:
             bm.quotes.setdefault(market, {})[outcome] = Quote(market, outcome, price, fair, taken)
@@ -248,9 +259,10 @@ def analyze(bm: BoardMatch, model, now: int | None = None) -> Analysis:
     res = Analysis(bm, (a[1] if a else None, b[1] if b else None))
     if not (a and b) or a[0] == b[0]:
         return res
-    p = model.predict(a[0], b[0], now)
+    extra = {"patch": bm.cond} if bm.cond else {}  # теннис: покрытие вместо патча
+    p = model.predict(a[0], b[0], now, **extra)
     if hasattr(model, "explain"):
-        res.factors = model.explain(a[0], b[0], now)
+        res.factors = model.explain(a[0], b[0], now, **extra)
     won, lost = bm.maps_score
     res.p_map = p
     bo = bm.best_of

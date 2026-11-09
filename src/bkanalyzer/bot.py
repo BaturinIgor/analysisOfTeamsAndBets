@@ -17,13 +17,13 @@ import httpx
 
 from . import analysis, rating, sim as simmod
 from .analysis import Analysis, Thresholds, market_label
-from .games import ALL, CS2, DOTA, PANDASCORE, Game, by_key
+from .games import ALL, CS2, DOTA, EXTRA, TENNIS, Game, by_key, history_module
 
 API = "https://api.telegram.org"
 NOISY_FAILS = 3  # с какого обрыва подряд писать в лог
 MAX_LEN = 4000
 
-HELP = """Анализатор ставок Dota 2, CS2 и LoL
+HELP = """Анализатор ставок Dota 2, CS2, LoL и тенниса
 
 Пользуйтесь кнопками внизу экрана. Под списком матчей — кнопки разбора (🔎) и новостей (📰).
 Можно просто написать название команды — покажу её матч или рейтинг.
@@ -45,7 +45,8 @@ HELP = """Анализатор ставок Dota 2, CS2 и LoL
 Коэффициенты: линия Oddin (на ней работает BetBoom), обновляется автоматически.
 Вероятности: рейтинг Elo + форма + личные встречи + патч + стабильность состава по картам Tier 1–2, обучено на истории.
 После драфта — ещё сила героев в патче и опыт игроков на них.
-CS2 и LoL: рейтинг Elo по сериям из PandaScore (нужен бесплатный PANDASCORE_TOKEN), только победа в матче."""
+CS2 и LoL: рейтинг Elo по сериям из PandaScore (нужен бесплатный PANDASCORE_TOKEN), только победа в матче.
+Теннис: линия Pinnacle (PINNWIRE_API_KEY), история ATP/WTA с tennis-data.co.uk, Elo + форма на покрытии, только победа в матче до начала."""
 
 
 
@@ -121,15 +122,16 @@ class ModelCache:
         return self._model, key[0] or 0  # число карт в базе
 
     def _get_ps(self, conn: sqlite3.Connection):
-        """CS2 и LoL: история серий из PandaScore."""
-        from . import aliases, cs, model as mm
+        """CS2, LoL (PandaScore) и теннис (tennis-data.co.uk)."""
+        from . import aliases, model as mm
 
-        cs.ensure_schema(conn, self.game)
+        hist = history_module(self.game)
+        hist.ensure_schema(conn, self.game)
         aliases.load(conn)
         conn.row_factory = None
         key = conn.execute(f"SELECT COUNT(*), MAX(match_id) FROM {self.game.maps_table}").fetchone()
         if key != self._key or self._model is None:
-            maps = cs.maps(conn, game=self.game)
+            maps = hist.maps(conn, game=self.game)
             since = (maps[-1]["start_time"] - self.eval_days * 86400) if maps else 0
             self._model, self.report = mm.train(maps, since)
             self._key = key
@@ -173,7 +175,7 @@ class Bot:
         self.export_dir = Path(export_dir)
         self.news_client = news_client  # None — новости только из кэша (в тестах)
         self.models = ModelCache()
-        self.game_models = {g.key: ModelCache(game=g) for g in PANDASCORE}
+        self.game_models = {g.key: ModelCache(game=g) for g in EXTRA}
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._last_list: list[str] = []  # fixture_id по номерам из /today
 
@@ -270,9 +272,9 @@ class Bot:
         lines.append("\nМы — наша вероятность победы первой команды. * — в эфире (вместо времени счёт).")
         if not maps and any(a.match.game == "dota2" for a in items):
             lines.append("Истории матчей Dota нет — оценки не будет. Запустите один раз: bk sync-matches")
-        for g in PANDASCORE:
+        for g in EXTRA:
             if any(a.match.game == g.key for a in items) and not self._models(g).get(self.conn)[1]:
-                lines.append(f"Истории {g.label} нет — оценки не будет. Нужен PANDASCORE_TOKEN в .env, затем: {g.sync_cmd}")
+                lines.append(f"Истории {g.label} нет — оценки не будет. Запустите: {g.sync_cmd}")
         lines.append("Подробно — кнопки ниже (🔎 разбор, 📰 состав и новости).")
         buttons = []
         for i, a in enumerate(items[:20], 1):
@@ -351,7 +353,7 @@ class Bot:
         s1, s2 = a.known
         lines = [
             f"{m.team1} — {m.team2}" + (f" ({game.label})" if game is not DOTA else ""),
-            f"{m.tournament or ''}, Bo{m.best_of}{'' if m.format_known else ' (формат не известен, считаю Bo3)'}, начало {_local(m.start_time, self.tz)}" + (f", в эфире, счёт {m.score}" if m.phase == "live" else ""),
+            f"{m.tournament or ''}" + (f", покрытие {m.cond}" if m.cond else "") + ("" if game.single else f", Bo{m.best_of}{'' if m.format_known else ' (формат не известен, считаю Bo3)'}") + f", начало {_local(m.start_time, self.tz)}" + (f", в эфире, счёт {m.score}" if m.phase == "live" else ""),
             f"Рейтинг: {_team(m.team1, s1)} vs {_team(m.team2, s2)}",
         ]
         if a.p_map is not None:
@@ -363,13 +365,14 @@ class Bot:
 
                 top = sorted(a.factors, key=lambda f: -abs(f[2]))[:4]
                 lines.append("Главные факторы (+ за " + m.team1 + ", − за " + m.team2 + "):")
-                lines += [f"  {LABELS.get(n, n)}: {c:+.2f}" for n, _, c in top if abs(c) >= 0.01]
+                labels = {**LABELS, "patch": "форма на покрытии"} if game is TENNIS else LABELS
+                lines += [f"  {labels.get(n, n)}: {c:+.2f}" for n, _, c in top if abs(c) >= 0.01]
         else:
             missing = [t for t, st in ((m.team1, s1), (m.team2, s2)) if st is None]
-            where = "Tier 1–2" if game is DOTA else f"{game.label} (PandaScore)"
+            where = "Tier 1–2" if game is DOTA else "ATP/WTA (tennis-data.co.uk)" if game is TENNIS else f"{game.label} (PandaScore)"
             lines.append(f"Нашей оценки нет: не нашёл в истории {where} {', '.join(missing) or 'одну из команд'}. "
                          "Если это переименованная команда, свяжите названия на Mac: bk unmatched, затем bk alias")
-        lines.append("\nЛиния Oddin (коэфф. · вероятность БК без маржи):")
+        lines.append(f"\nЛиния {'Pinnacle' if game.feed == 'pinnwire' else 'Oddin'} (коэфф. · вероятность БК без маржи):")
         for market in sorted(m.quotes, key=lambda k: (k != "match_winner", k)):
             parts = [f"{q.outcome} {q.price:.2f} · {_pct(q.fair_prob)}" for q in m.quotes[market].values()]
             lines.append(f"  {market_label(market)}: " + ", ".join(parts))
@@ -388,6 +391,9 @@ class Bot:
         if game is DOTA:
             lines.append("Модель не знает героев до драфта (после драфта бот пересчитает карту сам и пришлёт сигнал, если он есть). "
                          "Подробнее — кнопка «Новости» ниже.")
+        elif game is TENNIS:
+            lines.append("Теннис: рейтинг Elo по матчам ATP/WTA + форма на покрытии; ставим только на победу в матче до начала. "
+                         "Pinnacle — самая точная линия, сигналы будут редкими.")
         else:
             lines.append(f"{game.label}: модель знает только силу команд по сериям (без карт, пиков и состава), считаем только победу в матче.")
         fid = m.fixture_id
@@ -457,7 +463,7 @@ class Bot:
         if r.features_eval is not None:
             lines.append(f"Признаки команд проиграли рейтингу на последних днях (log-loss {r.features_eval.log_loss:.4f}), "
                          "поэтому до драфта работает рейтинг Elo, а драфт добавляется сверху.")
-        for g in PANDASCORE:
+        for g in EXTRA:
             cache = self._models(g)
             _, g_maps = cache.get(self.conn)
             c = cache.report

@@ -18,6 +18,7 @@ class Settings:
     oddspapi_winner_market: str = ""
     oddiwire_api_key: str = ""
     pandascore_token: str = ""   # бесплатный ключ PandaScore: история CS2 и LoL; без него их не собираем
+    pinnwire_api_key: str = ""   # бесплатный ключ PinnWire (линия Pinnacle): теннис; без него теннис не собираем
     games_filter: tuple = ()     # GAMES: какие игры собирать (dota2, cs2, lol); пусто — все доступные
     signal_min_ev: float = 0.03
     signal_min_prob: float = 0.0
@@ -44,9 +45,9 @@ class Settings:
 
     @property
     def games(self):
-        from .games import DOTA, PANDASCORE
+        from .games import DOTA, PANDASCORE, TENNIS
 
-        extra = PANDASCORE if self.pandascore_token else ()
+        extra = (PANDASCORE if self.pandascore_token else ()) + ((TENNIS,) if self.pinnwire_api_key else ())
         if self.games_filter:  # Dota оставляем всегда: от неё зависят драфт и основная статистика
             extra = tuple(g for g in extra if g.key in self.games_filter)
         return (DOTA, *extra)
@@ -86,6 +87,7 @@ def load_settings(env_file: str | os.PathLike | None = ".env") -> Settings:
         oddspapi_winner_market=g("ODDSPAPI_WINNER_MARKET", ""),
         oddiwire_api_key=g("ODDIWIRE_API_KEY", ""),
         pandascore_token=g("PANDASCORE_TOKEN", ""),
+        pinnwire_api_key=g("PINNWIRE_API_KEY", ""),
         games_filter=tuple(x.strip().lower() for x in (g("GAMES", "") or "").split(",") if x.strip()),
         signal_min_ev=float(g("SIGNAL_MIN_EV", "") or 0.03),
         signal_min_prob=float(g("SIGNAL_MIN_PROB", "") or 0.0),

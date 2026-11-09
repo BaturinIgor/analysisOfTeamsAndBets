@@ -215,13 +215,13 @@ class MatchModel:
         x = [self.logit(a, b, now)] + self.state.draft_features(picks_a, picks_b, now)
         return _sigmoid(sum(w * xi for w, xi in zip(self.draft_weights, x)))
 
-    def predict(self, a: int, b: int, now: int) -> float:
-        x = self.state.features(a, b, now)
+    def predict(self, a: int, b: int, now: int, patch: str | None = None) -> float:
+        x = self.state.features(a, b, now, patch)
         return _sigmoid(sum(w * xi for w, xi in zip(self.weights, x)))
 
-    def explain(self, a: int, b: int, now: int) -> list[tuple[str, float, float]]:
+    def explain(self, a: int, b: int, now: int, patch: str | None = None) -> list[tuple[str, float, float]]:
         """(признак, значение, вклад в логит) — для обоснования в боте."""
-        x = self.state.features(a, b, now)
+        x = self.state.features(a, b, now, patch)
         return [(name, xi, w * xi) for name, xi, w in zip(FEATURES, x, self.weights)]
 
 
@@ -297,16 +297,16 @@ def _walk(maps, elo_params: dict, min_games: int, collect_since: int | None = No
         rs, ds = st.elo.rating(r, t), st.elo.rating(d, t)
         pr, pd = m.get("picks_r"), m.get("picks_d")
         if rs.games >= min_games and ds.games >= min_games and (collect_since is None or t >= collect_since):
-            x = st.features(r, d, t)
+            x = st.features(r, d, t, m.get("patch"))  # теннис: покрытие матча
             samples.append((t, x, int(m["radiant_win"]), 1 / (1 + 10 ** (-x[0]))))
             if pr and pd and len(pr) == 5 and len(pd) == 5:
                 dsamples.append((t, x, st.draft_features(pr, pd, t), int(m["radiant_win"])))
         lr, ld = m.get("lineup_r"), m.get("lineup_d")
         if m["radiant_win"]:
-            st.update(r, d, t, m["radiant_name"] or "", m["dire_name"] or "", lineups=(lr, ld))
+            st.update(r, d, t, m["radiant_name"] or "", m["dire_name"] or "", patch=m.get("patch"), lineups=(lr, ld))
             st.update_draft(pr, pd, t)
         else:
-            st.update(d, r, t, m["dire_name"] or "", m["radiant_name"] or "", lineups=(ld, lr))
+            st.update(d, r, t, m["dire_name"] or "", m["radiant_name"] or "", patch=m.get("patch"), lineups=(ld, lr))
             st.update_draft(pd, pr, t)
     return st, samples, dsamples
 

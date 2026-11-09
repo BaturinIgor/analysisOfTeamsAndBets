@@ -44,15 +44,16 @@ CREATE TABLE IF NOT EXISTS paper_bets (
 """
 
 MODES = ("prematch", "draft", "live", "longshot", "cs_prematch", "cs_live", "cs_longshot",
-         "lol_prematch", "lol_live", "lol_longshot")
+         "lol_prematch", "lol_live", "lol_longshot", "ten_prematch", "ten_longshot")
 MODE_LABEL = {"prematch": "до матча", "draft": "после драфта", "live": "в эфире",
               "longshot": "аутсайдеры (на заметку)", "cs_prematch": "CS2 до матча", "cs_live": "CS2 в эфире",
               "cs_longshot": "CS2 аутсайдеры (на заметку)", "lol_prematch": "LoL до матча", "lol_live": "LoL в эфире",
-              "lol_longshot": "LoL аутсайдеры (на заметку)"}
+              "lol_longshot": "LoL аутсайдеры (на заметку)", "ten_prematch": "теннис до матча",
+              "ten_longshot": "теннис аутсайдеры (на заметку)"}
 # «аутсайдеры»: модель расходится с рынком сильнее SIGNAL_MAX_GAP. Такие ставки не делаем,
 # а записываем на заметку фиксированной суммой без уведомлений — чтобы проверить, кто прав.
-QUIET_MODES = ("longshot", "cs_longshot", "lol_longshot")
-OPTIONAL_MODES = ("cs_prematch", "cs_live", "lol_prematch", "lol_live")  # в отчёте — только если по ним уже есть ставки
+QUIET_MODES = ("longshot", "cs_longshot", "lol_longshot", "ten_longshot")
+OPTIONAL_MODES = ("cs_prematch", "cs_live", "lol_prematch", "lol_live", "ten_prematch")  # в отчёте — только если по ним уже есть ставки
 
 
 STRATEGY_LABEL = {"fixed": "фикс. сумма", "percent": "% банка", "kelly": "Келли"}
@@ -203,7 +204,7 @@ def _ts(iso: str | None) -> int | None:
 
 
 def find_series(conn: sqlite3.Connection, team1: str, team2: str, start_iso: str | None, created_iso: str,
-                table: str = "pro_maps") -> list[sqlite3.Row] | None:
+                table: str = "pro_maps", before: int = 3 * 3600) -> list[sqlite3.Row] | None:
     """Карты серии этих команд из истории игры (pro_maps или cs_maps) после начала матча, по возрастанию времени."""
     from . import aliases
 
@@ -213,7 +214,7 @@ def find_series(conn: sqlite3.Connection, team1: str, team2: str, start_iso: str
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         f"SELECT * FROM {table} WHERE start_time BETWEEN ? AND ? ORDER BY start_time, match_id",
-        (start - 3 * 3600, start + 2 * 86400),
+        (start - before, start + 2 * 86400),
     ).fetchall()
     conn.row_factory = None
 
@@ -291,18 +292,24 @@ def settle(conn: sqlite3.Connection, now: datetime | None = None, void_after_day
     for bet in bets:
         game = by_mode(bet["mode"])
         try:
-            maps = find_series(conn, bet["team1"], bet["team2"], bet["start_time"], bet["created_at"], table=game.maps_table)
+            # теннис: в истории только день матча (12:00 UTC) — окно шире
+            maps = find_series(conn, bet["team1"], bet["team2"], bet["start_time"], bet["created_at"], table=game.maps_table,
+                               before=36 * 3600 if game.single else 3 * 3600)
         except sqlite3.OperationalError:  # истории этой игры ещё нет
             maps = None
         bet["draw_offered"] = bool(conn.execute(
             "SELECT 1 FROM odds_snapshots WHERE fixture_id=? AND market='match_winner' AND LOWER(outcome) IN ('draw','x','tie','ничья') LIMIT 1",
             (bet["fixture_id"],)).fetchone())
         res = settle_result(bet, maps) if maps else None
+        comment = (dict(maps[0]).get("comment") or "Completed") if maps else "Completed"
+        if maps and comment != "Completed":
+            res = ("void", f"матч не доигран ({comment})")  # отказ или снятие — ставка возвращается
         if res is None:
             created = datetime.fromisoformat(bet["created_at"])
-            if now - created < timedelta(days=void_after_days):
+            wait = max(void_after_days, game.settle_days)
+            if now - created < timedelta(days=wait):
                 continue
-            res = ("void", f"результат не найден в истории {game.label} за 3 дня")
+            res = ("void", f"результат не найден в истории {game.label} за {wait:.0f} дн.")
         status, note = res
         profit = round(bet["stake"] * (bet["price"] - 1), 2) if status == "won" else -bet["stake"] if status == "lost" else 0.0
         close = closing_price(conn, bet) if base_mode(bet["mode"]) == "prematch" else None
@@ -413,7 +420,7 @@ MIN_BETS_FOR_VERDICT = 30
 
 SHORT_MODE = {"prematch": "Dota до", "draft": "Dota драфт", "live": "Dota эфир", "cs_prematch": "CS2 до",
               "cs_live": "CS2 эфир", "lol_prematch": "LoL до", "lol_live": "LoL эфир", "longshot": "Dota",
-              "cs_longshot": "CS2", "lol_longshot": "LoL"}
+              "cs_longshot": "CS2", "lol_longshot": "LoL", "ten_prematch": "Теннис до", "ten_longshot": "Теннис"}
 MODE_W = 10  # ширина столбца режима в таблицах
 SHORT_STRATEGY = {"fixed": "фикс", "percent": "%банка", "kelly": "Келли"}
 
