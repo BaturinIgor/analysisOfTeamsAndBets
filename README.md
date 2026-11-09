@@ -18,6 +18,29 @@ cp .env.example .env
 
 Откройте `.env` и вставьте токены: `STRATZ_TOKEN`, `ODDSPAPI_API_KEY` (и `TELEGRAM_BOT_TOKEN` — понадобится на этапе 1). Файл `.env` в git не попадает.
 
+## Установка на Windows
+
+1. Поставьте **Python 3.13** с python.org (в установщике отметьте «Add python.exe to PATH») и **Git** с git-scm.com.
+2. В PowerShell:
+   ```powershell
+   git clone https://github.com/BaturinIgor/analysisOfTeamsAndBets.git
+   cd analysisOfTeamsAndBets
+   py -3.13 -m venv .venv
+   Set-ExecutionPolicy -Scope CurrentUser RemoteSigned   # один раз, чтобы PowerShell разрешил активировать .venv
+   .venv\Scripts\Activate.ps1
+   pip install -e ".[dev]"
+   copy .env.example .env
+   notepad .env
+   ```
+   В `.env` впишите те же токены, что на Mac (`TELEGRAM_BOT_TOKEN`, `STRATZ_TOKEN`, `ODDIWIRE_API_KEY`, `PANDASCORE_TOKEN`). Пороги и стратегии уже стоят в `.env.example` по умолчанию.
+3. История и бумажные ставки. Либо перенесите с Mac файл `data/bk.sqlite3` в папку `data` на Windows (сохранятся ставки, линия и вся история карт), либо соберите заново: `bk sync-matches --days 730` (1–2 часа) и `bk sync-cs`.
+4. Остановите бота на Mac: два бота с одним токеном мешают друг другу и делят квоту OddiWire.
+5. Включите VPN (провайдер режет Telegram) и запустите `bk bot`. На Windows бот сам не даёт компьютеру уснуть, пока работает (аналог `caffeinate -i`), экран при этом гаснет как обычно.
+
+**Автозапуск и перезапуск.** `scripts\windows\bk-bot.bat` запускает бота, пишет лог в `data\bot.log` и перезапускает его через минуту, если он упал. Чтобы бот стартовал сам после входа в Windows (например, после перезагрузки из-за обновлений): Планировщик заданий → «Создать задачу» → Триггеры: «При входе в систему» → Действия: «Запуск программы», путь к `bk-bot.bat` → Условия: снять «Запускать только при питании от сети». VPN тоже должен подключаться сам при входе.
+
+Обновление до свежей версии: `git pull`, затем `pip install -e ".[dev]"` и перезапуск бота.
+
 ## Команды этапа 0
 
 1. **Проверка источников** — по строке на каждый источник, `[ OK ]` или `[FAIL]` с причиной:

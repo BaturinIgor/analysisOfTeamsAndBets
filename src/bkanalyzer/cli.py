@@ -324,6 +324,25 @@ def run_collector(s: Settings, conn, interval: int = 600, maps: bool = True, onc
     return 0
 
 
+def _utf8_console() -> None:
+    """Windows: при выводе в файл (автозапуск) Python пишет в cp1251, и эмодзи роняют бота. Пишем UTF-8."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
+def keep_awake() -> bool:
+    """Аналог caffeinate -i на Windows: не даёт компьютеру уснуть, пока работает процесс (экран может гаснуть)."""
+    if sys.platform != "win32":
+        return False
+    import ctypes
+
+    ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+    return bool(ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED))
+
+
 def run_bot(s: Settings, collect: bool = True, interval: int = 600) -> int:
     import threading
 
@@ -337,6 +356,8 @@ def run_bot(s: Settings, collect: bool = True, interval: int = 600) -> int:
         return 1
     from .bot import Outbox, check_telegram, make_telegram_client
 
+    if keep_awake():
+        print("Windows: сон компьютера отключён, пока работает бот")
     tg = make_telegram_client(s.telegram_proxy)
     outbox = None
     if collect:
@@ -674,6 +695,8 @@ def main(argv: list[str] | None = None) -> int:
     p_co.add_argument("--once", action="store_true")
 
     args = parser.parse_args(argv)
+    if sys.platform == "win32":
+        _utf8_console()
     s = load_settings()
 
     if args.cmd == "check-sources":

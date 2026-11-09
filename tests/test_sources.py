@@ -163,3 +163,10 @@ def test_oddspapi_sample_prints_raw_when_unparsed():
     out = oddspapi_sample(settings(), c)
     assert "ещё не начались: 1" in out and "Матч new" in out and "Матч old" not in out
     assert "ключи ответа: ['weird']" in out
+
+
+def test_keep_awake_is_noop_outside_windows(monkeypatch):
+    from bkanalyzer import cli
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    assert cli.keep_awake() is False
