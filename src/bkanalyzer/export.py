@@ -61,6 +61,12 @@ SUMMARY_HEAD = ["Режим", "Стратегия", "Ставок", "Откры�
                 "ROI", "Банк", "В игре", "Свободно", "Макс. просадка", "Худшая серия", "Средний CLV"]
 
 
+def _strategy(key: str) -> str:
+    profile, _, name = key.rpartition(":")
+    label = simmod.STRATEGY_LABEL.get(name, name)
+    return f"{profile} · {label}" if profile else label
+
+
 def bet_rows(conn: sqlite3.Connection, tz: ZoneInfo) -> list[tuple[list, str | None]]:
     simmod.ensure_schema(conn)
     conn.row_factory = sqlite3.Row
@@ -72,7 +78,7 @@ def bet_rows(conn: sqlite3.Connection, tz: ZoneInfo) -> list[tuple[list, str | N
         values = [r["id"], _local(r["created_at"], tz), simmod.MODE_LABEL.get(r["mode"], r["mode"]), _local(r["start_time"], tz),
                   r["team1"], r["team2"], market_label(r["market"]), r["pick"], r["price"], round(r["prob"], 4),
                   round(r["book_prob"], 4) if r["book_prob"] is not None else None, round(r["prob"] * r["price"] - 1, 4),
-                  r["stake"], r["bank_before"], r["strategy"], STATUS.get(r["status"], r["status"]),
+                  r["stake"], r["bank_before"], _strategy(r["strategy"]), STATUS.get(r["status"], r["status"]),
                   r["profit"], r["closing_price"], round(clv, 4) if clv is not None else None,
                   _local(r["settled_at"], tz), r["note"] or ""]
         out.append((values, {"won": GREEN, "lost": RED, "void": GREY}.get(r["status"])))
@@ -81,12 +87,15 @@ def bet_rows(conn: sqlite3.Connection, tz: ZoneInfo) -> list[tuple[list, str | N
 
 def summary_rows(conn: sqlite3.Connection, cfg: simmod.SimSettings) -> list[tuple[list, str | None]]:
     out = []
-    for mode in simmod.MODES:
-        for c in simmod.strategies_for(cfg, mode):
+    pairs = [(prof, mode) for prof in (cfg, *cfg.experiments) for mode in simmod.MODES
+             if not (prof.profile and mode in simmod.QUIET_MODES)]  # у экспериментов нет «на заметку»
+    for prof, mode in pairs:
+        for c in simmod.strategies_for(prof, mode):
             s = simmod.summary(conn, c, mode)
-            if mode in simmod.OPTIONAL_MODES + ("cs_longshot",) and not s["bets"]:
+            if (prof.profile or mode in simmod.OPTIONAL_MODES + ("cs_longshot",)) and not s["bets"]:
                 continue
-            values = [simmod.MODE_LABEL[mode], simmod.STRATEGY_LABEL.get(c.strategy, c.strategy), s["bets"], s["open"], s["won"], s["lost"], s["void"], round(s["staked"], 2),
+            label = simmod.STRATEGY_LABEL.get(c.strategy, c.strategy)
+            values = [simmod.MODE_LABEL[mode], f"{prof.profile} · {label}" if prof.profile else label, s["bets"], s["open"], s["won"], s["lost"], s["void"], round(s["staked"], 2),
                       round(s["profit"], 2), round(s["roi"], 4) if s["roi"] is not None else None, round(s["bank"], 2),
                       round(s["in_play"], 2), round(s["free"], 2),
                       round(s["max_dd"], 4), s["worst_streak"], round(s["clv"], 4) if s["clv"] is not None else None]

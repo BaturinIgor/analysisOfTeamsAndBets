@@ -208,9 +208,15 @@ def simulate_step(s: Settings, conn, models, od=None, last_sync: list | None = N
         log("  " + sim.placed_message(b))
         if notify:
             notify(sim.placed_message(b))
+    for e in cfg.experiments:  # эксперименты: свои пороги на тех же коэффициентах, без уведомлений
+        for b in sim.place_bets(conn, analyses, e.thresholds, e):
+            log(f"  [{e.profile}] " + sim.placed_message(b))
     for b in sim.place_longshots(conn, analyses, s.thresholds(), cfg):
         log("  на заметку: " + sim.placed_message(b))
     done = sim.settle(conn)
+    for text in sim.settled_messages([b for b in done if ":" in b["strategy"]]):
+        log("  [эксперимент] " + text)
+    done = [b for b in done if ":" not in b["strategy"]]
     for text in sim.settled_messages([b for b in done if b["mode"] in sim.QUIET_MODES]):
         log("  на заметку: " + text)
     for text in sim.settled_messages([b for b in done if b["mode"] not in sim.QUIET_MODES]):
@@ -260,11 +266,16 @@ def draft_step(s: Settings, conn, models, od, ow, seen: set, notify=None, log=pr
         if not res:
             continue
         p, picks = res
+        cfg = s.sim()
+        for e in cfg.experiments:
+            e_best = draft.best_signal(picks, e.thresholds)
+            if e_best and sim.place_pick(conn, draft.as_analysis(bm, picks), e_best, "draft", e):
+                log(f"  [{e.profile}] драфт {bm.team1} — {bm.team2}: {e_best.team} @ {e_best.price:.2f}")
         best = draft.best_signal(picks, s.thresholds())
         log(f"  драфт {bm.team1} — {bm.team2}: наша {p:.0%}, сигнал: {'да' if best else 'нет'}")
         if best is None:
             continue
-        bet = sim.place_pick(conn, draft.as_analysis(bm, picks), best, "draft", s.sim())
+        bet = sim.place_pick(conn, draft.as_analysis(bm, picks), best, "draft", cfg)
         if notify:
             notify(draft.message(bm, p, best, bet is not None) + draft.roster_note(conn, model, bm, d, team1_radiant, now))
         if bet:

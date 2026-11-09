@@ -169,3 +169,51 @@ def test_low_history_pick_is_suspicious():
     assert "расходится" in t.reason(big_gap)
     good = Pick("match", "A", 2.2, 0.50, 0.44, 200)
     assert t.reason(good) is None and t.ok(good)
+
+
+def test_experiments_bet_separately_on_same_odds():
+    from bkanalyzer.analysis import Thresholds
+    from bkanalyzer.config import Settings
+
+    s = Settings(sim_experiments="Фавориты: prob=0.5; Строгий: prob=0.5 ev=0.04 gap=0.06 games=50")
+    cfg = s.sim()
+    assert [e.profile for e in cfg.experiments] == ["Фавориты", "Строгий"]
+    fav, strict = cfg.experiments
+    from dataclasses import replace
+
+    assert fav.thresholds == replace(s.thresholds(), min_prob=0.5)
+    assert (strict.thresholds.min_ev, strict.thresholds.max_gap, strict.thresholds.min_games) == (0.04, 0.06, 50)
+    assert [c.key for c in fav.all()] == ["Фавориты:fixed", "Фавориты:percent", "Фавориты:kelly"]
+    assert isinstance(cfg.thresholds, Thresholds)
+
+
+def test_experiment_bank_and_report_are_separate(conn):
+    from dataclasses import replace
+
+    base = replace(CFG, strategies=("fixed", "percent"), thresholds=Thresholds(0.05))
+    exp = replace(base, profile="Фавориты", thresholds=Thresholds(0.05, min_prob=0.5))
+    never = replace(base, profile="Никогда", thresholds=Thresholds(0.05, min_prob=0.99))
+    cfg = replace(base, experiments=(exp, never))
+    assert len(sim.place_bets(conn, analyses(conn), cfg.thresholds, cfg, now=NOW)) == 1
+    assert len(sim.place_bets(conn, analyses(conn), exp.thresholds, exp, now=NOW)) == 1  # тот же матч, свой профиль
+    assert sim.place_bets(conn, analyses(conn), exp.thresholds, exp, now=NOW) == []
+    assert sim.place_bets(conn, analyses(conn), never.thresholds, never, now=NOW) == []
+    rows = [r[0] for r in conn.execute("SELECT strategy FROM paper_bets ORDER BY id")]
+    assert rows == ["fixed", "percent", "Фавориты:fixed", "Фавориты:percent"]
+    assert sim.bank(conn, "prematch", exp.all()[0]) == 950
+    assert sim.summary(conn, cfg.all()[0], "prematch")["bets"] == 1
+    text = sim.report(conn, cfg)
+    assert "Сравнение настроек" in text and "Фавориты: EV ≥ 5%, наша ≥ 50%" in text and "ставок пока нет" in text
+    from bkanalyzer import export
+    labels = [v[1] for v, _ in export.summary_rows(conn, cfg)]
+    assert "Фавориты · фикс. сумма" in labels and not any(l.startswith("Никогда") for l in labels)
+
+
+def test_parse_experiments_errors_and_empty():
+    import pytest
+
+    from bkanalyzer.analysis import Thresholds
+
+    assert sim.parse_experiments("", Thresholds()) == []
+    with pytest.raises(ValueError):
+        sim.parse_experiments("X: foo=1", Thresholds())
