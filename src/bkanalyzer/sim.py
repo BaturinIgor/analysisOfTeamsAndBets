@@ -402,6 +402,43 @@ def report(conn: sqlite3.Connection, cfg: SimSettings) -> str:
     return "\n".join(lines)
 
 
+def _money(x: float) -> str:
+    return f"{x:,.0f}".replace(",", " ")
+
+
+def banks_report(conn: sqlite3.Connection, cfg: SimSettings) -> str:
+    """Каждый банк отдельно: профиль × режим × стратегия — сумма, выигрыши/проигрыши, прибыль, ROI."""
+    lines = [f"💰 Банки (старт {_money(cfg.bank)} у каждого)"]
+    for prof in (cfg, *cfg.experiments):
+        name = prof.profile or "Основной"
+        lines.append(f"\n▶️ {name.upper()} — {describe_thresholds(prof.thresholds)}")
+        totals = {c.strategy: [0.0, 0, 0] for c in prof.all()}  # прибыль, выигрыши, проигрыши
+        shown = False
+        for mode in MODES:
+            if mode in QUIET_MODES:
+                continue
+            sums = [summary(conn, c, mode) for c in prof.all()]
+            if not sums[0]["bets"]:
+                continue
+            shown = True
+            lines.append(f"{_cap(MODE_LABEL[mode])}:")
+            for s in sums:
+                t = totals[s["strategy"]]
+                t[0] += s["profit"]
+                t[1] += s["won"]
+                t[2] += s["lost"]
+                roi = f", ROI {s['roi']:+.1%}" if s["roi"] is not None else ""
+                play = f", в игре {_money(s['in_play'])}" if s["in_play"] else ""
+                lines.append(f"  {STRATEGY_LABEL.get(s['strategy'], s['strategy'])}: {_money(s['bank'])} "
+                             f"({s['profit']:+.0f}){play}; ✅ {s['won']} ❌ {s['lost']} ⏳ {s['open']}{roi}")
+        if not shown:
+            lines.append("  ставок пока нет")
+            continue
+        lines.append("Итого: " + "; ".join(f"{STRATEGY_LABEL.get(k, k)} {v[0]:+.0f} (✅ {v[1]} ❌ {v[2]})"
+                                           for k, v in totals.items()))
+    return "\n".join(lines)
+
+
 def describe_thresholds(t: Thresholds | None) -> str:
     if t is None:
         return ""
