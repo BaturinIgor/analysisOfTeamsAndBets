@@ -106,7 +106,7 @@ def test_bot_shows_lol(tmp_path):
     conn = seeded(tmp_path)
     bot = Bot(conn, (ME,), Thresholds(0.03, max_gap=0.5), now=lambda: NOW)
     text = bot.handle(ME, "/today").text
-    assert "Матчи LoL в линии:" in text and "T1 — Gen.G" in text
+    assert "LoL: линия" in text and "T1-Gen.G" in text
     m = bot.handle(ME, "/match 1").text
     assert "(LoL)" in m and "только победу в матче" in m
     assert "LoL: T1" in bot.handle(ME, "/team T1")
