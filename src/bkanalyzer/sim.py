@@ -406,9 +406,46 @@ def _money(x: float) -> str:
     return f"{x:,.0f}".replace(",", " ")
 
 
+MIN_BETS_FOR_VERDICT = 30
+
+
+def leaderboard(conn: sqlite3.Connection, cfg: SimSettings) -> list[str]:
+    """Рейтинг «профиль + стратегия» по прибыли во всех режимах (кроме «на заметку»)."""
+    rows = []
+    for prof in (cfg, *cfg.experiments):
+        for c in prof.all():
+            sums = [summary(conn, c, m) for m in MODES if m not in QUIET_MODES]
+            settled = sum(s["won"] + s["lost"] for s in sums)
+            if not settled:
+                continue
+            profit = sum(s["profit"] for s in sums)
+            staked = sum(s["staked"] for s in sums)
+            clv = [r["price"] / r["closing_price"] - 1 for s in sums for r in s["rows"]
+                   if r["status"] in ("won", "lost") and r.get("closing_price")]
+            rows.append((profit, prof.profile or "Основной", c.strategy, settled, profit / staked if staked else 0.0,
+                         sum(clv) / len(clv) if clv else None))
+    if not rows:
+        return ["\n🏆 Лучшая стратегия: пока нет рассчитанных ставок"]
+    rows.sort(key=lambda r: r[0], reverse=True)
+    out = ["\n🏆 Рейтинг (прибыль по всем режимам):"]
+    for i, (profit, name, strat, n, roi, clv) in enumerate(rows, 1):
+        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
+        clv_txt = f", CLV {clv:+.1%}" if clv is not None else ""
+        out.append(f"{medal} {name} · {STRATEGY_LABEL.get(strat, strat)}: {profit:+.0f}, ROI {roi:+.1%}, ставок {n}{clv_txt}")
+    best = rows[0]
+    if best[3] < MIN_BETS_FOR_VERDICT:
+        out.append(f"Лидер пока случайный: у него {best[3]} рассчитанных ставок, вывод — от {MIN_BETS_FOR_VERDICT}. "
+                   "Смотрите и на CLV: плюс — значит берём цену лучше закрытия.")
+    else:
+        out.append(f"Лучшая: {best[1]} · {STRATEGY_LABEL.get(best[2], best[2])}"
+                   + (" — и CLV положительный." if best[5] is not None and best[5] > 0 else ", но CLV не в плюсе — возможно, везение."))
+    return out
+
+
 def banks_report(conn: sqlite3.Connection, cfg: SimSettings) -> str:
     """Каждый банк отдельно: профиль × режим × стратегия — сумма, выигрыши/проигрыши, прибыль, ROI."""
     lines = [f"💰 Банки (старт {_money(cfg.bank)} у каждого)"]
+    lines += leaderboard(conn, cfg)
     for prof in (cfg, *cfg.experiments):
         name = prof.profile or "Основной"
         lines.append(f"\n▶️ {name.upper()} — {describe_thresholds(prof.thresholds)}")
