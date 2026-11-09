@@ -70,12 +70,17 @@ def check_sources(s: Settings, client=None) -> int:
         def pandascore():
             from .sources.pandascore import PandaScore
 
-            last = PandaScore(client, s.pandascore_token).cs_past(per_page=5)
-            m = last[0] if last else {}
-            names = " vs ".join((o.get("opponent") or {}).get("name", "?") for o in m.get("opponents") or [])
-            return f"последняя серия CS2: {names or 'нет'} ({m.get('begin_at', '')[:10]})"
+            from .games import PANDASCORE
 
-        results.append(_check("PandaScore CS2", pandascore))
+            out = []
+            for game in PANDASCORE:
+                last = PandaScore(client, s.pandascore_token).past(game.pandascore, per_page=5)
+                m = last[0] if last else {}
+                names = " vs ".join((o.get("opponent") or {}).get("name", "?") for o in m.get("opponents") or [])
+                out.append(f"последняя серия {game.label}: {names or 'нет'} ({(m.get('begin_at') or '')[:10]})")
+            return "; ".join(out)
+
+        results.append(_check("PandaScore CS2 и LoL", pandascore))
     ok = sum(results)
     print(f"\nИтого: {ok} из {len(results)} проверок прошли.")
     return 0 if ok == len(results) else 1
@@ -100,12 +105,33 @@ def collect_odds_once(s: Settings, conn, client=None) -> int:
     return saved
 
 
-def collect_oddiwire_once(conn, ow: OddiWire, maps: bool = True, log=print, max_calls: int | None = None, game=None) -> int:
+def live_expected(conn, game, now: float | None = None, ahead: int = 1800, window: int = 6 * 3600) -> bool:
+    """Есть ли у игры матч, который уже идёт или начнётся в ближайшие ahead секунд (по прошлым снимкам линии).
+
+    Нужно, чтобы не тратить квоту OddiWire на пустой список «в эфире» у CS2 и LoL.
+    """
+    from datetime import datetime
+
+    now = now or time.time()
+    for (start,) in conn.execute("SELECT start_time FROM bookmaker_matches WHERE source=? AND start_time IS NOT NULL",
+                                 (game.source,)):
+        try:
+            ts = datetime.fromisoformat(str(start).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+        if now - window <= ts <= now + ahead:
+            return True
+    return False
+
+
+def collect_oddiwire_once(conn, ow: OddiWire, maps: bool = True, log=print, max_calls: int | None = None, game=None,
+                          live: bool = True) -> int:
     """Один снимок линии игры (по умолчанию Dota) из OddiWire: в эфире и до матча.
 
     Списки берём на tier=1 (там победа в матче). Победа на картах лежит в tier=3,
     её дозапрашиваем get_fixture только по матчам в эфире — после драфта это важнее всего.
     max_calls ограничивает число платных по квоте запросов в этом снимке.
+    live=False — список «в эфире» не запрашиваем (у игры сейчас нет идущих матчей).
     """
     from .games import DOTA
 
@@ -113,7 +139,7 @@ def collect_oddiwire_once(conn, ow: OddiWire, maps: bool = True, log=print, max_
     maps = maps and game.map_markets
     left = 10**9 if max_calls is None else max_calls
     events: dict[str, dict] = {}
-    for tool in ("get_live_odds", "get_prematch_odds"):
+    for tool in ("get_live_odds", "get_prematch_odds") if live else ("get_prematch_odds",):
         if left <= 0:
             break
         payload = ow.call(tool, {"sport": game.sport, "tier": 1, "limit": 100})
@@ -178,31 +204,39 @@ def simulate_step(s: Settings, conn, models, od=None, last_sync: list | None = N
         except SourceError as exc:
             log(f"  OpenDota: {exc}")
     from .bot import ModelCache
-    from .games import CS2
+    from .games import DOTA
 
     now = int(time.time())
     model, _ = models.get(conn)
     analyses = [analysis.analyze(m, model, now) for m in analysis.load_board(conn)]
-    if CS2 in s.games:
-        if last_sync is not None and len(last_sync) < 2:
-            last_sync.append(0.0)
-        if last_sync is not None and time.monotonic() - last_sync[1] > 3600:
+    # CS2 и LoL: история из PandaScore раз в час, у каждой игры своя модель
+    synced = getattr(models, "ps_synced", None)
+    if synced is None:
+        synced = models.ps_synced = {}
+    caches = getattr(models, "games", None)
+    if caches is None:
+        caches = models.games = {}
+    for game in s.games:
+        if game is DOTA:
+            continue
+        if last_sync is not None and time.monotonic() - synced.get(game.key, float("-inf")) > 3600:
             try:
                 from . import cs
                 from .sources.pandascore import PandaScore
 
-                added = cs.sync(conn, PandaScore(make_client(s.user_agent), s.pandascore_token), 365, log=lambda *_: None)
-                last_sync[1] = time.monotonic()
+                added = cs.sync(conn, PandaScore(make_client(s.user_agent), s.pandascore_token), 365, log=lambda *_: None,
+                                game=game)
+                synced[game.key] = time.monotonic()
                 if added:
-                    log(f"  новых карт CS2 из PandaScore: {added}")
+                    log(f"  новых карт {game.label} из PandaScore: {added}")
             except SourceError as exc:
-                log(f"  PandaScore: {exc}")
-        cs_models = getattr(models, "cs", None)
-        if cs_models is None:
-            cs_models = models.cs = ModelCache(game=CS2)
-        cs_model, cs_maps = cs_models.get(conn)
-        if cs_maps:
-            analyses += [analysis.analyze(m, cs_model, now) for m in analysis.load_board(conn, game=CS2)]
+                log(f"  PandaScore {game.label}: {exc}")
+        cache = caches.get(game.key)
+        if cache is None:
+            cache = caches[game.key] = ModelCache(game=game)
+        g_model, g_maps = cache.get(conn)
+        if g_maps:
+            analyses += [analysis.analyze(m, g_model, now) for m in analysis.load_board(conn, game=game)]
     cfg = s.sim()
     for b in sim.place_bets(conn, analyses, s.thresholds(), cfg):
         log("  " + sim.placed_message(b))
@@ -304,7 +338,9 @@ def run_collector(s: Settings, conn, interval: int = 600, maps: bool = True, onc
             n = 0
             for game in s.games:  # Dota первой: её драфт и карты важнее
                 used_now, _ = ow.budget() if game is not s.games[0] else (before, limit)
-                n += collect_oddiwire_once(conn, ow, maps=maps, max_calls=max(0, limit - used_now), log=log, game=game)
+                # у CS2 и LoL список «в эфире» спрашиваем, только когда их матч идёт или вот-вот начнётся
+                live = game is s.games[0] or live_expected(conn, game, ahead=int(interval) * 3)
+                n += collect_oddiwire_once(conn, ow, maps=maps, max_calls=max(0, limit - used_now), log=log, game=game, live=live)
             used, limit = ow.budget()
             # сколько запросов реально ушло на снимок (после полуночи UTC счётчик обнуляется)
             spent = used - before if used >= before else used
@@ -669,6 +705,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p_cs = sub.add_parser("sync-cs", help="загрузить историю серий CS2 из PandaScore (нужен PANDASCORE_TOKEN)")
     p_cs.add_argument("--days", type=int, default=365)
+    p_lol = sub.add_parser("sync-lol", help="загрузить историю серий League of Legends из PandaScore (нужен PANDASCORE_TOKEN)")
+    p_lol.add_argument("--days", type=int, default=365)
 
     p_re = sub.add_parser("rating-eval", help="проверить рейтинг на истории и показать топ команд")
     p_re.add_argument("--eval-days", type=int, default=180, help="за сколько последних дней оценивать прогнозы")
@@ -761,17 +799,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Карт с составом добавлено: {details.sync_players(conn, od)}")
         return 0
 
-    if args.cmd == "sync-cs":
+    if args.cmd in ("sync-cs", "sync-lol"):
         from . import cs
+        from .games import CS2, LOL
         from .sources.pandascore import PandaScore
 
+        game = CS2 if args.cmd == "sync-cs" else LOL
         if not s.pandascore_token:
             print("Нет PANDASCORE_TOKEN в .env. Бесплатный ключ: зарегистрируйтесь на pandascore.co, токен — в личном кабинете.")
             return 1
         conn = db.connect(Path(s.db_path))
-        added = cs.sync(conn, PandaScore(make_client(s.user_agent), s.pandascore_token), args.days)
-        total, = conn.execute("SELECT COUNT(*) FROM cs_maps").fetchone()
-        print(f"Новых карт CS2: {added}; всего карт {total}. Проверка модели: bk model-eval")
+        added = cs.sync(conn, PandaScore(make_client(s.user_agent), s.pandascore_token), args.days, game=game)
+        total, = conn.execute(f"SELECT COUNT(*) FROM {game.maps_table}").fetchone()
+        print(f"Новых карт {game.label}: {added}; всего карт {total}. Проверка модели: bk model-eval")
         return 0
 
     if args.cmd == "rating-eval":
@@ -848,11 +888,9 @@ def main(argv: list[str] | None = None) -> int:
         conn = db.connect(Path(s.db_path))
         model, _ = ModelCache().get(conn)
         rows = aliases.unmatched(conn, model)
-        if s.pandascore_token:
-            from .games import CS2
-
-            cs_model, _ = ModelCache(game=CS2).get(conn)
-            rows += [(f"{t} (CS2)", h) for t, h in aliases.unmatched(conn, cs_model, game=CS2)]
+        for game in s.games[1:]:  # CS2, LoL
+            g_model, _ = ModelCache(game=game).get(conn)
+            rows += [(f"{t} ({game.label})", h) for t, h in aliases.unmatched(conn, g_model, game=game)]
         if not rows:
             print("Все команды из линии найдены в истории.")
         for team, hint in rows:

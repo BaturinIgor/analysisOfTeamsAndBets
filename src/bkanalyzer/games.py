@@ -1,8 +1,8 @@
-"""Игры, которые мы считаем: Dota 2 (история OpenDota) и CS2 (история PandaScore).
+"""Игры, которые мы считаем: Dota 2 (история OpenDota), CS2 и League of Legends (история PandaScore).
 
-Линия обеих — из OddiWire (фид Oddin, как у BetBoom). Строки CS2 в базе хранятся
-с source='oddiwire_cs2', а бумажные ставки — в режимах с префиксом «cs_», поэтому
-у CS2 свои банки и своя статистика, и ничего не смешивается с Dota.
+Линия всех — из OddiWire (фид Oddin, как у BetBoom). Строки CS2 в базе хранятся
+с source='oddiwire_cs2', а бумажные ставки — в режимах с префиксом «cs_» (у LoL —
+'oddiwire_lol' и «lol_»), поэтому у каждой игры свои банки и своя статистика.
 """
 
 from __future__ import annotations
@@ -20,12 +20,17 @@ class Game:
     mode_prefix: str    # префикс режимов симулятора
     map_markets: bool   # считаем ли рынки на отдельные карты
     news_word: str      # добавка к поиску новостей
+    pandascore: str = ""  # игра в API PandaScore (история серий); пусто — история не из PandaScore
+    sync_cmd: str = ""    # команда загрузки истории
 
 
 DOTA = Game("dota2", "Dota 2", "DOTA2", "oddiwire", "pro_maps", "", True, "dota")
 # CS2: в бесплатной истории PandaScore есть только счёт серии, без порядка карт — рынки на карты не считаем
-CS2 = Game("cs2", "CS2", "CS2", "oddiwire_cs2", "cs_maps", "cs_", False, "cs2")
-ALL = (DOTA, CS2)
+CS2 = Game("cs2", "CS2", "CS2", "oddiwire_cs2", "cs_maps", "cs_", False, "cs2", "csgo", "bk sync-cs")
+# LoL: так же, как CS2 — счёт серий из PandaScore, только победа в матче
+LOL = Game("lol", "LoL", "LOL", "oddiwire_lol", "lol_maps", "lol_", False, "league of legends", "lol", "bk sync-lol")
+ALL = (DOTA, CS2, LOL)
+PANDASCORE = (CS2, LOL)  # игры с историей из PandaScore
 
 
 def by_key(key: str | None) -> Game:
@@ -37,6 +42,6 @@ def by_mode(mode: str) -> Game:
 
 
 def base_mode(mode: str) -> str:
-    """cs_prematch → prematch."""
+    """cs_prematch → prematch, lol_live → live."""
     g = by_mode(mode)
     return mode[len(g.mode_prefix):] if g.mode_prefix else mode

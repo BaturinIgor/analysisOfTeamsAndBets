@@ -1,8 +1,8 @@
-"""История CS2 из PandaScore в SQLite.
+"""История CS2 и LoL из PandaScore в SQLite (таблицы cs_maps и lol_maps).
 
 Серию со счётом 2:1 раскладываем на 3 карты (порядок внутри серии неизвестен: победы и
-поражения чередуем). Таблица cs_maps повторяет колонки pro_maps, поэтому Elo, модель,
-формат турнира и расчёт бумажных ставок работают для CS2 тем же кодом.
+поражения чередуем). Таблицы повторяют колонки pro_maps, поэтому Elo, модель,
+формат турнира и расчёт бумажных ставок работают для CS2 и LoL тем же кодом.
 """
 
 from __future__ import annotations
@@ -11,8 +11,10 @@ import sqlite3
 import time
 from datetime import datetime
 
+from .games import CS2, Game
+
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS cs_maps (
+CREATE TABLE IF NOT EXISTS {table} (
     match_id INTEGER PRIMARY KEY,    -- id серии PandaScore * 10 + номер карты
     start_time INTEGER NOT NULL,
     league_name TEXT,
@@ -25,8 +27,8 @@ CREATE TABLE IF NOT EXISTS cs_maps (
     dire_name TEXT,
     radiant_win INTEGER
 );
-CREATE INDEX IF NOT EXISTS ix_cs_maps_time ON cs_maps (start_time);
-CREATE TABLE IF NOT EXISTS cs_sync (       -- до какой даты история уже загружена целиком
+CREATE INDEX IF NOT EXISTS ix_{table}_time ON {table} (start_time);
+CREATE TABLE IF NOT EXISTS cs_sync (       -- до какой даты история уже загружена целиком (ключи всех игр PandaScore)
     key TEXT PRIMARY KEY,
     value INTEGER
 );
@@ -35,8 +37,18 @@ CREATE TABLE IF NOT EXISTS cs_sync (       -- до какой даты исто�
 SERIES_TYPE = {1: 0, 2: 3, 3: 1, 5: 2}
 
 
-def ensure_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(SCHEMA)
+def ensure_schema(conn: sqlite3.Connection, game: Game = CS2) -> None:
+    conn.executescript(SCHEMA.format(table=game.maps_table))
+
+
+def _sync_key(game: Game) -> str:
+    # v3: метки прошлых версий писались при неверной сортировке запроса — их не учитываем
+    return "backfilled_since_v3" if game is CS2 else f"{game.key}_backfilled_since_v3"
+
+
+def _fetch(ps, game: Game):
+    """Метод клиента PandaScore для игры: cs_past или lol_past."""
+    return getattr(ps, "cs_past" if game is CS2 else f"{game.key}_past")
 
 
 def _ts(iso: str | None) -> int | None:
@@ -87,17 +99,18 @@ def series_maps(m: dict) -> list[tuple]:
 
 
 def sync(conn: sqlite3.Connection, ps, days: int = 365, *, now: float | None = None, max_pages: int = 400,
-         sleep=time.sleep, pause: float = 0.5, log=print) -> int:
-    """Загружает сыгранные серии CS2 за days дней (от новых к старым), пока не дойдёт до уже загруженных."""
-    ensure_schema(conn)
+         sleep=time.sleep, pause: float = 0.5, log=print, game: Game = CS2) -> int:
+    """Загружает сыгранные серии игры за days дней (от новых к старым), пока не дойдёт до уже загруженных."""
+    ensure_schema(conn, game)
     since = (now or time.time()) - days * 86400
-    # v3: метки прошлых версий писались при неверной сортировке запроса — их не учитываем
-    row = conn.execute("SELECT value FROM cs_sync WHERE key='backfilled_since_v3'").fetchone()
+    key = _sync_key(game)
+    fetch = _fetch(ps, game)
+    row = conn.execute("SELECT value FROM cs_sync WHERE key=?", (key,)).fetchone()
     covered = row is not None and row[0] <= since
     saved = seen = kept = 0
     complete = False
     for page in range(1, max_pages + 1):
-        items = ps.cs_past(page=page)
+        items = fetch(page=page)
         if not items:
             complete = True  # старше данных нет
             break
@@ -105,7 +118,7 @@ def sync(conn: sqlite3.Connection, ps, days: int = 365, *, now: float | None = N
         rows = [r for m in items for r in series_maps(m) if r[1] >= since]
         kept += len({r[4] for r in rows})
         before = conn.total_changes
-        conn.executemany("INSERT OR IGNORE INTO cs_maps VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
+        conn.executemany(f"INSERT OR IGNORE INTO {game.maps_table} VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
         conn.commit()
         added = conn.total_changes - before
         saved += added
@@ -117,18 +130,18 @@ def sync(conn: sqlite3.Connection, ps, days: int = 365, *, now: float | None = N
         if covered and added == 0 and rows:
             break  # дошли до уже загруженного
         if page % 10 == 0:
-            log(f"  CS2: страниц {page}, серий {seen} (сыграно {kept}), новых карт {saved}")
+            log(f"  {game.label}: страниц {page}, серий {seen} (сыграно {kept}), новых карт {saved}")
         sleep(pause)
     if complete and not covered:
-        conn.execute("INSERT OR REPLACE INTO cs_sync VALUES ('backfilled_since_v3', ?)", (int(since),))
+        conn.execute("INSERT OR REPLACE INTO cs_sync VALUES (?, ?)", (key, int(since)))
         conn.commit()
-    log(f"  CS2: страниц {page if items else page - 1}, серий {seen}, из них сыграно со счётом {kept}")
+    log(f"  {game.label}: страниц {page if items else page - 1}, серий {seen}, из них сыграно со счётом {kept}")
     return saved
 
 
-def maps(conn: sqlite3.Connection, since: int = 0) -> list[dict]:
-    ensure_schema(conn)
+def maps(conn: sqlite3.Connection, since: int = 0, game: Game = CS2) -> list[dict]:
+    ensure_schema(conn, game)
     conn.row_factory = sqlite3.Row
-    rows = [dict(r) for r in conn.execute("SELECT * FROM cs_maps WHERE start_time >= ? ORDER BY start_time, match_id", (since,))]
+    rows = [dict(r) for r in conn.execute(f"SELECT * FROM {game.maps_table} WHERE start_time >= ? ORDER BY start_time, match_id", (since,))]
     conn.row_factory = None
     return rows

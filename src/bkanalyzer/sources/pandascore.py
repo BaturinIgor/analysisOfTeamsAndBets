@@ -1,7 +1,7 @@
 """PandaScore: бесплатный тариф «Schedules, Results & Context Data» — 1000 запросов в час.
 
 Ключ бесплатный (регистрация на pandascore.co, без карты), задаётся PANDASCORE_TOKEN.
-CS2 в API называется csgo: /csgo/matches/past — сыгранные серии со счётом.
+CS2 в API называется csgo: /csgo/matches/past — сыгранные серии со счётом; LoL — /lol/matches/past.
 Карты внутри серии на бесплатном тарифе не отдаются, поэтому берём счёт серии (results).
 """
 
@@ -25,9 +25,15 @@ class PandaScore:
         return request_json(self.client, "GET", f"{BASE_URL}{path}", params=params,
                             headers={"Authorization": f"Bearer {self.token}", "Accept": "application/json"})
 
-    def cs_past(self, page: int = 1, per_page: int = 100) -> list[dict]:
-        """Сыгранные серии CS2, от новых к старым."""
+    def past(self, videogame: str, page: int = 1, per_page: int = 100) -> list[dict]:
+        """Сыгранные серии игры (csgo, lol), от новых к старым."""
         # по begin_at нельзя: у отменённых и части сыгранных он пустой, и при сортировке они идут первыми
-        data = self._get("/csgo/matches/past", **{"filter[status]": "finished", "sort": "-scheduled_at",
-                                                    "page": page, "per_page": per_page})
+        data = self._get(f"/{videogame}/matches/past", **{"filter[status]": "finished", "sort": "-scheduled_at",
+                                                           "page": page, "per_page": per_page})
         return data if isinstance(data, list) else []
+
+    def cs_past(self, page: int = 1, per_page: int = 100) -> list[dict]:
+        return self.past("csgo", page, per_page)
+
+    def lol_past(self, page: int = 1, per_page: int = 100) -> list[dict]:
+        return self.past("lol", page, per_page)
