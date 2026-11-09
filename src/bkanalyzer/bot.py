@@ -57,6 +57,7 @@ class Reply:
     files: list[Path] = field(default_factory=list)
     buttons: list[list[tuple[str, str]]] = field(default_factory=list)  # [(надпись, callback_data)]
     menu: bool = False
+    html: bool = False  # текст размечен HTML (таблицы в <pre>)
 
     def __contains__(self, item: str) -> bool:
         return item in self.text
@@ -460,7 +461,7 @@ class Bot:
             if cmd == "/sim":
                 return simmod.report(self.conn, self.sim)
             if cmd == "/banks":
-                return simmod.banks_report(self.conn, self.sim)
+                return Reply(simmod.banks_report(self.conn, self.sim), html=True)
             if cmd == "/export":
                 return self.export()
             if not cmd.startswith("/"):
@@ -562,6 +563,8 @@ def send_reply(client: httpx.Client, token: str, chat_id: int, reply: str | Repl
     markup = reply_markup(r)
     for i, part in enumerate(parts):
         body = {"chat_id": chat_id, "text": part, "disable_web_page_preview": True}
+        if r.html:
+            body["parse_mode"] = "HTML"
         if markup and i == len(parts) - 1:
             body["reply_markup"] = markup
         try:

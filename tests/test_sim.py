@@ -227,11 +227,12 @@ def test_banks_report_and_button(conn):
     cfg = replace(base, experiments=(exp,))
     sim.place_bets(conn, analyses(conn), cfg.thresholds, cfg, now=NOW)
     text = sim.banks_report(conn, cfg)
-    assert "ОСНОВНОЙ" in text and "ФАВОРИТЫ" in text and "ставок пока нет" in text
+    assert "<b>Основной</b>" in text and "Фавориты: ставок пока нет" in text
     assert "Лучшая стратегия: пока нет рассчитанных ставок" in text
-    assert "фикс. сумма: 1 000 (+0), в игре 50; ✅ 0 ❌ 0 ⏳ 1" in text
+    assert "<pre>" in text and "до     0-0      +0     +0" in text and "открыто ставок: 1" in text
     b = Bot(conn, (ME,), Thresholds(0.05), now=lambda: NOW, sim=cfg)
-    assert "ФАВОРИТЫ" in b.handle(ME, "💰 Банки")
+    r = b.handle(ME, "💰 Банки")
+    assert r.html and "<pre>" in r.text
 
 
 def test_leaderboard_orders_by_profit(conn):
@@ -242,5 +243,7 @@ def test_leaderboard_orders_by_profit(conn):
     conn.execute("UPDATE paper_bets SET status='won', profit=stake*(price-1)")
     conn.commit()
     lines = sim.leaderboard(conn, cfg)
-    assert lines[1].startswith("🥇 Основной · % банка") and lines[2].startswith("🥈 Основной · фикс. сумма")
-    assert "Лидер пока случайный" in lines[-1]
+    assert lines[0].startswith("🥇 Основной · % банка") and lines[1].startswith("🥈 Основной · фикс. сумма")
+    assert "Рано судить" in lines[-1]
+    text = sim.banks_report(conn, cfg)
+    assert "ИТОГО  1-0" in text and "ROI" in text
