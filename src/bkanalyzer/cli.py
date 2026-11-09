@@ -762,6 +762,8 @@ def main(argv: list[str] | None = None) -> int:
     p_lol.add_argument("--days", type=int, default=365)
     p_ten = sub.add_parser("sync-tennis", help="загрузить историю ATP/WTA с tennis-data.co.uk (без ключа)")
     p_ten.add_argument("--years", type=int, default=3)
+    p_tb = sub.add_parser("tennis-backtest", help="теннис: модель против закрытия Pinnacle на истории (прибыль при разных порогах)")
+    p_tb.add_argument("--eval-days", type=int, default=365)
     sub.add_parser("pinnwire-sample", help="проверить PinnWire (линия Pinnacle): сохранить ответ по теннису в data/pinnwire_sample.json")
 
     p_re = sub.add_parser("rating-eval", help="проверить рейтинг на истории и показать топ команд")
@@ -864,6 +866,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Новых матчей: {added}; всего {total}. Проверка модели: bk model-eval")
         if not s.pinnwire_api_key:
             print("Для линии нужен бесплатный ключ PinnWire: pinnwire.com → Trial, затем PINNWIRE_API_KEY в .env")
+        return 0
+
+    if args.cmd == "tennis-backtest":
+        from . import tennis
+
+        print(tennis.backtest(db.connect(Path(s.db_path)), args.eval_days))
         return 0
 
     if args.cmd == "pinnwire-sample":

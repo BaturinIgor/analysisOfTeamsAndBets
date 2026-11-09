@@ -67,7 +67,7 @@ class FakePW:
 def seeded(tmp_path):
     conn = db.connect(tmp_path / "bk.sqlite3")
     tennis.ensure_schema(conn)
-    conn.executemany("INSERT INTO tennis_maps VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", tennis.parse_rows("ATP", HEADER, table()))
+    tennis.insert(conn, tennis.parse_rows("ATP", HEADER, table()))
     conn.commit()
     tennis.collect_once(conn, FakePW(), TENNIS, log=lambda *_: None)
     return conn
@@ -97,9 +97,8 @@ def test_board_model_bet_and_settlement(tmp_path, monkeypatch):
     assert sim.settle(conn, now=NOW + timedelta(days=5)) == []
     # результат: день матча 12:00 UTC, а матч начинался в 15:00 — всё равно находим
     day = int(datetime(2026, 11, 5, 12, tzinfo=timezone.utc).timestamp())
-    conn.execute("INSERT INTO tennis_maps VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                 (9, day, "Paris Masters Paris", "ATP", 9, 0, 1, "Sinner J.", 2, "De Minaur A.", 1, "Hard", "Completed"))
-    conn.commit()
+    tennis.insert(conn, [
+                 (9, day, "Paris Masters Paris", "ATP", 9, 0, 1, "Sinner J.", 2, "De Minaur A.", 1, "Hard", "Completed")])
     done = sim.settle(conn, now=NOW + timedelta(days=6))
     assert done and all(b["status"] == "won" for b in done) and done[0]["closing_price"] == 1.9
     assert "Теннис до" in sim.report_html(conn, sim.SimSettings(strategies=("fixed",)))
@@ -113,9 +112,8 @@ def test_retired_match_is_void(tmp_path):
                  (NOW.isoformat(), "111", "ten_prematch", "Sinner J.", "De Minaur A.", "2026-11-05T15:00:00Z", "match_winner",
                   "Sinner J.", 1.9, 0.6, 50, 1000, "fixed"))
     day = int(datetime(2026, 11, 5, 12, tzinfo=timezone.utc).timestamp())
-    conn.execute("INSERT INTO tennis_maps VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                 (9, day, "Paris", "ATP", 9, 0, 1, "Sinner J.", 2, "De Minaur A.", 0, "Hard", "Retired"))
-    conn.commit()
+    tennis.insert(conn, [
+                 (9, day, "Paris", "ATP", 9, 0, 1, "Sinner J.", 2, "De Minaur A.", 0, "Hard", "Retired")])
     done = sim.settle(conn, now=NOW + timedelta(days=1))
     assert done[0]["status"] == "void" and "Retired" in done[0]["note"]
 
@@ -170,3 +168,11 @@ def test_index_links():
     assert links == {("ATP", 2025): "https://tennis-data.co.uk/hrjk-85HytOjkhth76j_ygh4jf7/2025/2025.xlsx",
                      ("WTA", 2025): "https://tennis-data.co.uk/hrjk-85HytOjkhth76j_ygh4jf7/2025w/2025.xlsx"}
     assert tennis.urls(2025, links)[1][1].endswith("/2025w/2025.xlsx") and "hrjk" in tennis.urls(2025, links)[1][1]
+
+
+def test_backtest_against_closing_odds(tmp_path):
+    conn = db.connect(tmp_path / "bk.sqlite3")
+    tennis.insert(conn, tennis.parse_rows("ATP", HEADER, table(200)))
+    text = tennis.backtest(conn, eval_days=60, min_games=5)
+    assert "Pinnacle:" in text and "наша модель" in text and "ставок" in text
+    assert "    3%     10%" in text
