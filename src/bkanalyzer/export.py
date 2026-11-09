@@ -92,7 +92,7 @@ def summary_rows(conn: sqlite3.Connection, cfg: simmod.SimSettings) -> list[tupl
     for prof, mode in pairs:
         for c in simmod.strategies_for(prof, mode):
             s = simmod.summary(conn, c, mode)
-            if (prof.profile or mode in simmod.OPTIONAL_MODES + ("cs_longshot",)) and not s["bets"]:
+            if (prof.profile or (mode in simmod.OPTIONAL_MODES or (mode in simmod.QUIET_MODES and mode != "longshot"))) and not s["bets"]:
                 continue
             label = simmod.STRATEGY_LABEL.get(c.strategy, c.strategy)
             values = [simmod.MODE_LABEL[mode], f"{prof.profile} · {label}" if prof.profile else label, s["bets"], s["open"], s["won"], s["lost"], s["void"], round(s["staked"], 2),

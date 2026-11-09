@@ -35,8 +35,8 @@ def load(conn: sqlite3.Connection) -> dict[str, str]:
     return found
 
 
-def history_names(conn: sqlite3.Connection, tables=("pro_maps", "cs_maps")) -> dict[str, tuple[str, int]]:
-    """Нормализованное название → (как пишется, сколько карт) по истории Dota и CS2."""
+def history_names(conn: sqlite3.Connection, tables=("pro_maps", "cs_maps", "lol_maps")) -> dict[str, tuple[str, int]]:
+    """Нормализованное название → (как пишется, сколько карт) по истории Dota, CS2 и LoL."""
     conn.row_factory = None
     out: dict[str, tuple[str, int]] = {}
     rows = []

@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 from .analysis import Analysis, Thresholds, is_draw, market_label, normalize
-from .games import by_key, by_mode
+from .games import base_mode, by_key, by_mode
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS paper_bets (
@@ -43,14 +43,16 @@ CREATE TABLE IF NOT EXISTS paper_bets (
 );
 """
 
-MODES = ("prematch", "draft", "live", "longshot", "cs_prematch", "cs_live", "cs_longshot")
+MODES = ("prematch", "draft", "live", "longshot", "cs_prematch", "cs_live", "cs_longshot",
+         "lol_prematch", "lol_live", "lol_longshot")
 MODE_LABEL = {"prematch": "до матча", "draft": "после драфта", "live": "в эфире",
               "longshot": "аутсайдеры (на заметку)", "cs_prematch": "CS2 до матча", "cs_live": "CS2 в эфире",
-              "cs_longshot": "CS2 аутсайдеры (на заметку)"}
+              "cs_longshot": "CS2 аутсайдеры (на заметку)", "lol_prematch": "LoL до матча", "lol_live": "LoL в эфире",
+              "lol_longshot": "LoL аутсайдеры (на заметку)"}
 # «аутсайдеры»: модель расходится с рынком сильнее SIGNAL_MAX_GAP. Такие ставки не делаем,
 # а записываем на заметку фиксированной суммой без уведомлений — чтобы проверить, кто прав.
-QUIET_MODES = ("longshot", "cs_longshot")
-OPTIONAL_MODES = ("cs_prematch", "cs_live")  # в отчёте — только если по ним уже есть ставки
+QUIET_MODES = ("longshot", "cs_longshot", "lol_longshot")
+OPTIONAL_MODES = ("cs_prematch", "cs_live", "lol_prematch", "lol_live")  # в отчёте — только если по ним уже есть ставки
 
 
 STRATEGY_LABEL = {"fixed": "фикс. сумма", "percent": "% банка", "kelly": "Келли"}
@@ -271,15 +273,15 @@ def settle_result(bet: dict, maps: list) -> tuple[str, str] | None:
 
 def closing_price(conn: sqlite3.Connection, bet: dict) -> float | None:
     row = conn.execute(
-        """SELECT price FROM odds_snapshots WHERE source IN ('oddiwire', 'oddiwire_cs2') AND fixture_id=? AND market=? AND outcome=?
+        """SELECT price FROM odds_snapshots WHERE source=? AND fixture_id=? AND market=? AND outcome=?
              AND (phase='prematch' OR phase IS NULL) ORDER BY id DESC LIMIT 1""",
-        (bet["fixture_id"], bet["market"], bet["pick"]),
+        (by_mode(bet["mode"]).source, bet["fixture_id"], bet["market"], bet["pick"]),
     ).fetchone()
     return row[0] if row else None
 
 
 def settle(conn: sqlite3.Connection, now: datetime | None = None, void_after_days: float = 3) -> list[dict]:
-    """Рассчитывает открытые ставки по истории карт их игры (Dota — pro_maps, CS2 — cs_maps). Возвращает рассчитанные."""
+    """Рассчитывает открытые ставки по истории карт их игры (Dota — pro_maps, CS2 — cs_maps, LoL — lol_maps). Возвращает рассчитанные."""
     ensure_schema(conn)
     now = now or datetime.now(timezone.utc)
     conn.row_factory = sqlite3.Row
@@ -303,7 +305,7 @@ def settle(conn: sqlite3.Connection, now: datetime | None = None, void_after_day
             res = ("void", f"результат не найден в истории {game.label} за 3 дня")
         status, note = res
         profit = round(bet["stake"] * (bet["price"] - 1), 2) if status == "won" else -bet["stake"] if status == "lost" else 0.0
-        close = closing_price(conn, bet) if bet["mode"] in ("prematch", "cs_prematch") else None
+        close = closing_price(conn, bet) if base_mode(bet["mode"]) == "prematch" else None
         conn.execute(
             "UPDATE paper_bets SET status=?, profit=?, closing_price=?, settled_at=?, note=? WHERE id=?",
             (status, profit, close, now.isoformat(timespec="seconds"), note, bet["id"]),
