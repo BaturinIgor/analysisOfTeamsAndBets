@@ -409,8 +409,12 @@ def _money(x: float) -> str:
 MIN_BETS_FOR_VERDICT = 30
 
 
-def leaderboard(conn: sqlite3.Connection, cfg: SimSettings) -> list[str]:
-    """Рейтинг «профиль + стратегия» по прибыли во всех режимах (кроме «на заметку»)."""
+SHORT_MODE = {"prematch": "до", "draft": "драфт", "live": "эфир", "cs_prematch": "CS до", "cs_live": "CS эф"}
+SHORT_STRATEGY = {"fixed": "фикс", "percent": "%банка", "kelly": "Келли"}
+
+
+def _rank(conn: sqlite3.Connection, cfg: SimSettings) -> list[tuple]:
+    """(прибыль, профиль, стратегия, рассчитано, ROI, CLV) по всем режимам, кроме «на заметку»; лучшие сверху."""
     rows = []
     for prof in (cfg, *cfg.experiments):
         for c in prof.all():
@@ -424,56 +428,66 @@ def leaderboard(conn: sqlite3.Connection, cfg: SimSettings) -> list[str]:
                    if r["status"] in ("won", "lost") and r.get("closing_price")]
             rows.append((profit, prof.profile or "Основной", c.strategy, settled, profit / staked if staked else 0.0,
                          sum(clv) / len(clv) if clv else None))
+    return sorted(rows, key=lambda r: r[0], reverse=True)
+
+
+def leaderboard(conn: sqlite3.Connection, cfg: SimSettings) -> list[str]:
+    rows = _rank(conn, cfg)
     if not rows:
-        return ["\n🏆 Лучшая стратегия: пока нет рассчитанных ставок"]
-    rows.sort(key=lambda r: r[0], reverse=True)
-    out = ["\n🏆 Рейтинг (прибыль по всем режимам):"]
-    for i, (profit, name, strat, n, roi, clv) in enumerate(rows, 1):
-        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
+        return ["🏆 Лучшая стратегия: пока нет рассчитанных ставок"]
+    out = []
+    for i, (profit, name, strat, n, roi, clv) in enumerate(rows[:3], 1):
         clv_txt = f", CLV {clv:+.1%}" if clv is not None else ""
-        out.append(f"{medal} {name} · {STRATEGY_LABEL.get(strat, strat)}: {profit:+.0f}, ROI {roi:+.1%}, ставок {n}{clv_txt}")
+        out.append(f"{'🥇🥈🥉'[i - 1]} {name} · {STRATEGY_LABEL.get(strat, strat)}: {profit:+.0f} (ROI {roi:+.1%}, ставок {n}{clv_txt})")
     best = rows[0]
     if best[3] < MIN_BETS_FOR_VERDICT:
-        out.append(f"Лидер пока случайный: у него {best[3]} рассчитанных ставок, вывод — от {MIN_BETS_FOR_VERDICT}. "
-                   "Смотрите и на CLV: плюс — значит берём цену лучше закрытия.")
+        out.append(f"Рано судить: у лидера {best[3]} ставок, вывод — от {MIN_BETS_FOR_VERDICT}.")
+    elif best[5] is not None and best[5] > 0:
+        out.append(f"Лучшая: {best[1]} · {STRATEGY_LABEL.get(best[2], best[2])}, CLV в плюсе.")
     else:
-        out.append(f"Лучшая: {best[1]} · {STRATEGY_LABEL.get(best[2], best[2])}"
-                   + (" — и CLV положительный." if best[5] is not None and best[5] > 0 else ", но CLV не в плюсе — возможно, везение."))
+        out.append(f"Лидер {best[1]} · {STRATEGY_LABEL.get(best[2], best[2])}, но CLV не в плюсе — возможно, везение.")
     return out
 
 
 def banks_report(conn: sqlite3.Connection, cfg: SimSettings) -> str:
-    """Каждый банк отдельно: профиль × режим × стратегия — сумма, выигрыши/проигрыши, прибыль, ROI."""
-    lines = [f"💰 Банки (старт {_money(cfg.bank)} у каждого)"]
-    lines += leaderboard(conn, cfg)
+    """HTML для Telegram: рейтинг и по таблице на профиль (строки — режимы, столбцы — стратегии, в ячейках прибыль)."""
+    from html import escape
+
+    out = [f"💰 <b>Банки</b> (старт {_money(cfg.bank)} у каждого)", ""]
+    out += [escape(x) for x in leaderboard(conn, cfg)]
+    empty = []
     for prof in (cfg, *cfg.experiments):
         name = prof.profile or "Основной"
-        lines.append(f"\n▶️ {name.upper()} — {describe_thresholds(prof.thresholds)}")
-        totals = {c.strategy: [0.0, 0, 0] for c in prof.all()}  # прибыль, выигрыши, проигрыши
-        shown = False
+        strategies = prof.all()
+        table = []
+        totals = [[0.0, 0.0] for _ in strategies]  # прибыль, поставлено
+        won = lost = in_play = 0
         for mode in MODES:
             if mode in QUIET_MODES:
                 continue
-            sums = [summary(conn, c, mode) for c in prof.all()]
+            sums = [summary(conn, c, mode) for c in strategies]
             if not sums[0]["bets"]:
                 continue
-            shown = True
-            lines.append(f"{_cap(MODE_LABEL[mode])}:")
-            for s in sums:
-                t = totals[s["strategy"]]
-                t[0] += s["profit"]
-                t[1] += s["won"]
-                t[2] += s["lost"]
-                roi = f", ROI {s['roi']:+.1%}" if s["roi"] is not None else ""
-                play = f", в игре {_money(s['in_play'])}" if s["in_play"] else ""
-                lines.append(f"  {STRATEGY_LABEL.get(s['strategy'], s['strategy'])}: {_money(s['bank'])} "
-                             f"({s['profit']:+.0f}){play}; ✅ {s['won']} ❌ {s['lost']} ⏳ {s['open']}{roi}")
-        if not shown:
-            lines.append("  ставок пока нет")
+            m = sums[0]
+            won, lost, in_play = won + m["won"], lost + m["lost"], in_play + m["open"]
+            for tot, s in zip(totals, sums):
+                tot[0] += s["profit"]
+                tot[1] += s["staked"]
+            table.append(f"{SHORT_MODE.get(mode, mode):<6}{m['won']:>2}-{m['lost']:<2}" + "".join(f"{s['profit']:>+7.0f}" for s in sums))
+        if not table:
+            empty.append(name)
             continue
-        lines.append("Итого: " + "; ".join(f"{STRATEGY_LABEL.get(k, k)} {v[0]:+.0f} (✅ {v[1]} ❌ {v[2]})"
-                                           for k, v in totals.items()))
-    return "\n".join(lines)
+        head = " " * 11 + "".join(f"{SHORT_STRATEGY.get(c.strategy, c.strategy):>7}" for c in strategies)
+        total = f"{'ИТОГО':<6}{won:>2}-{lost:<2}" + "".join(f"{p:>+7.0f}" for p, _ in totals)
+        roi = f"{'ROI':<11}" + "".join(f"{(p / st if st else 0):>+7.0%}" for p, st in totals)
+        out += ["", f"<b>{escape(name)}</b>: {escape(describe_thresholds(prof.thresholds))}",
+                "<pre>" + escape("\n".join([head, *table, "-" * len(head), total, roi])) + "</pre>"]
+        if in_play:
+            out.append(f"⏳ открыто ставок: {in_play}")
+    if empty:
+        out += ["", escape(", ".join(empty)) + ": ставок пока нет"]
+    out += ["", "В ячейках — прибыль; 0-1 — выигрыши и проигрыши. Банки по режимам — в 📊 Симулятор."]
+    return "\n".join(out)
 
 
 def describe_thresholds(t: Thresholds | None) -> str:
