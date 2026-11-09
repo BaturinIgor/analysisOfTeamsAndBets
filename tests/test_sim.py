@@ -217,3 +217,30 @@ def test_parse_experiments_errors_and_empty():
     assert sim.parse_experiments("", Thresholds()) == []
     with pytest.raises(ValueError):
         sim.parse_experiments("X: foo=1", Thresholds())
+
+
+def test_banks_report_and_button(conn):
+    from dataclasses import replace
+
+    base = replace(CFG, strategies=("fixed", "percent"), thresholds=Thresholds(0.05))
+    exp = replace(base, profile="Фавориты", thresholds=Thresholds(0.05, min_prob=0.5))
+    cfg = replace(base, experiments=(exp,))
+    sim.place_bets(conn, analyses(conn), cfg.thresholds, cfg, now=NOW)
+    text = sim.banks_report(conn, cfg)
+    assert "ОСНОВНОЙ" in text and "ФАВОРИТЫ" in text and "ставок пока нет" in text
+    assert "Лучшая стратегия: пока нет рассчитанных ставок" in text
+    assert "фикс. сумма: 1 000 (+0), в игре 50; ✅ 0 ❌ 0 ⏳ 1" in text
+    b = Bot(conn, (ME,), Thresholds(0.05), now=lambda: NOW, sim=cfg)
+    assert "ФАВОРИТЫ" in b.handle(ME, "💰 Банки")
+
+
+def test_leaderboard_orders_by_profit(conn):
+    from dataclasses import replace
+
+    cfg = replace(CFG, strategies=("fixed", "percent"), percent=0.2, thresholds=Thresholds(0.05))
+    sim.place_bets(conn, analyses(conn), cfg.thresholds, cfg, now=NOW)
+    conn.execute("UPDATE paper_bets SET status='won', profit=stake*(price-1)")
+    conn.commit()
+    lines = sim.leaderboard(conn, cfg)
+    assert lines[1].startswith("🥇 Основной · % банка") and lines[2].startswith("🥈 Основной · фикс. сумма")
+    assert "Лидер пока случайный" in lines[-1]

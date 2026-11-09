@@ -402,6 +402,80 @@ def report(conn: sqlite3.Connection, cfg: SimSettings) -> str:
     return "\n".join(lines)
 
 
+def _money(x: float) -> str:
+    return f"{x:,.0f}".replace(",", " ")
+
+
+MIN_BETS_FOR_VERDICT = 30
+
+
+def leaderboard(conn: sqlite3.Connection, cfg: SimSettings) -> list[str]:
+    """Рейтинг «профиль + стратегия» по прибыли во всех режимах (кроме «на заметку»)."""
+    rows = []
+    for prof in (cfg, *cfg.experiments):
+        for c in prof.all():
+            sums = [summary(conn, c, m) for m in MODES if m not in QUIET_MODES]
+            settled = sum(s["won"] + s["lost"] for s in sums)
+            if not settled:
+                continue
+            profit = sum(s["profit"] for s in sums)
+            staked = sum(s["staked"] for s in sums)
+            clv = [r["price"] / r["closing_price"] - 1 for s in sums for r in s["rows"]
+                   if r["status"] in ("won", "lost") and r.get("closing_price")]
+            rows.append((profit, prof.profile or "Основной", c.strategy, settled, profit / staked if staked else 0.0,
+                         sum(clv) / len(clv) if clv else None))
+    if not rows:
+        return ["\n🏆 Лучшая стратегия: пока нет рассчитанных ставок"]
+    rows.sort(key=lambda r: r[0], reverse=True)
+    out = ["\n🏆 Рейтинг (прибыль по всем режимам):"]
+    for i, (profit, name, strat, n, roi, clv) in enumerate(rows, 1):
+        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
+        clv_txt = f", CLV {clv:+.1%}" if clv is not None else ""
+        out.append(f"{medal} {name} · {STRATEGY_LABEL.get(strat, strat)}: {profit:+.0f}, ROI {roi:+.1%}, ставок {n}{clv_txt}")
+    best = rows[0]
+    if best[3] < MIN_BETS_FOR_VERDICT:
+        out.append(f"Лидер пока случайный: у него {best[3]} рассчитанных ставок, вывод — от {MIN_BETS_FOR_VERDICT}. "
+                   "Смотрите и на CLV: плюс — значит берём цену лучше закрытия.")
+    else:
+        out.append(f"Лучшая: {best[1]} · {STRATEGY_LABEL.get(best[2], best[2])}"
+                   + (" — и CLV положительный." if best[5] is not None and best[5] > 0 else ", но CLV не в плюсе — возможно, везение."))
+    return out
+
+
+def banks_report(conn: sqlite3.Connection, cfg: SimSettings) -> str:
+    """Каждый банк отдельно: профиль × режим × стратегия — сумма, выигрыши/проигрыши, прибыль, ROI."""
+    lines = [f"💰 Банки (старт {_money(cfg.bank)} у каждого)"]
+    lines += leaderboard(conn, cfg)
+    for prof in (cfg, *cfg.experiments):
+        name = prof.profile or "Основной"
+        lines.append(f"\n▶️ {name.upper()} — {describe_thresholds(prof.thresholds)}")
+        totals = {c.strategy: [0.0, 0, 0] for c in prof.all()}  # прибыль, выигрыши, проигрыши
+        shown = False
+        for mode in MODES:
+            if mode in QUIET_MODES:
+                continue
+            sums = [summary(conn, c, mode) for c in prof.all()]
+            if not sums[0]["bets"]:
+                continue
+            shown = True
+            lines.append(f"{_cap(MODE_LABEL[mode])}:")
+            for s in sums:
+                t = totals[s["strategy"]]
+                t[0] += s["profit"]
+                t[1] += s["won"]
+                t[2] += s["lost"]
+                roi = f", ROI {s['roi']:+.1%}" if s["roi"] is not None else ""
+                play = f", в игре {_money(s['in_play'])}" if s["in_play"] else ""
+                lines.append(f"  {STRATEGY_LABEL.get(s['strategy'], s['strategy'])}: {_money(s['bank'])} "
+                             f"({s['profit']:+.0f}){play}; ✅ {s['won']} ❌ {s['lost']} ⏳ {s['open']}{roi}")
+        if not shown:
+            lines.append("  ставок пока нет")
+            continue
+        lines.append("Итого: " + "; ".join(f"{STRATEGY_LABEL.get(k, k)} {v[0]:+.0f} (✅ {v[1]} ❌ {v[2]})"
+                                           for k, v in totals.items()))
+    return "\n".join(lines)
+
+
 def describe_thresholds(t: Thresholds | None) -> str:
     if t is None:
         return ""
