@@ -25,6 +25,7 @@ class Game:
     feed: str = "oddiwire"  # откуда линия: oddiwire (Oddin) или pinnwire (Pinnacle)
     single: bool = False  # матч = одна «карта» (теннис): формат Bo1, в эфире не ставим
     settle_days: float = 3  # сколько ждать результат в истории, прежде чем вернуть ставку
+    notify: bool = True   # слать ли в Telegram бумажные ставки и их итоги (статистика ведётся в любом случае)
 
 
 DOTA = Game("dota2", "Dota 2", "DOTA2", "oddiwire", "pro_maps", "", True, "dota")
@@ -34,7 +35,8 @@ CS2 = Game("cs2", "CS2", "CS2", "oddiwire_cs2", "cs_maps", "cs_", False, "cs2", 
 LOL = Game("lol", "LoL", "LOL", "oddiwire_lol", "lol_maps", "lol_", False, "league of legends", "lol", "bk sync-lol")
 # Теннис: линия Pinnacle (PinnWire, sport_id=2), история tennis-data.co.uk (раз в неделю — ждём результат 10 дней)
 TENNIS = Game("tennis", "Теннис", "2", "pinnwire_tennis", "tennis_maps", "ten_", False, "tennis", "", "bk sync-tennis",
-              feed="pinnwire", single=True, settle_days=10)
+              feed="pinnwire", single=True, settle_days=10,
+              notify=False)  # 2026-11-09: модель проигрывает Pinnacle на истории — только статистика, без уведомлений
 ALL = (DOTA, CS2, LOL, TENNIS)
 PANDASCORE = (CS2, LOL)  # игры с историей из PandaScore
 EXTRA = (CS2, LOL, TENNIS)  # всё, кроме Dota: своя модель на истории серий/матчей
