@@ -50,8 +50,25 @@ INDEX_URL = f"{BASE_URL}/alldata.php"  # страница со списком ф
 SETTLE_DAYS = 10  # результаты приходят раз в неделю — ставки ждут дольше, чем в киберспорте
 
 
+COLUMNS = ("match_id", "start_time", "league_name", "tier", "series_id", "series_type", "radiant_team_id", "radiant_name",
+           "dire_team_id", "dire_name", "radiant_win", "surface", "comment", "odds_r", "odds_d")
+
+
 def ensure_schema(conn: sqlite3.Connection, game=None) -> None:
     conn.executescript(SCHEMA)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tennis_maps)")}
+    for name in ("odds_r", "odds_d"):  # коэффициенты закрытия Pinnacle (PSW/PSL) для проверки модели против рынка
+        if name not in cols:
+            conn.execute(f"ALTER TABLE tennis_maps ADD COLUMN {name} REAL")
+    conn.commit()
+
+
+def insert(conn: sqlite3.Connection, rows) -> None:
+    """INSERT OR REPLACE строк tennis_maps (13 полей без коэффициентов или все 15)."""
+    ensure_schema(conn)
+    full = [tuple(r) + (None,) * (len(COLUMNS) - len(r)) for r in rows]
+    conn.executemany(f"INSERT OR REPLACE INTO tennis_maps ({', '.join(COLUMNS)}) VALUES ({', '.join('?' * len(COLUMNS))})", full)
+    conn.commit()
 
 
 def key(name: str | None) -> str:
@@ -130,9 +147,19 @@ def parse_rows(tour: str, header: list, rows) -> list[tuple]:
         mid = _id(f"{tour}|{start}|{key(w)}|{key(l)}")
         swap = mid % 2 == 1  # порядок игроков случайный: иначе «первый» всегда побеждает
         a, b = (l, w) if swap else (w, l)
+        ow, ol = _odds(get(r, "psw")), _odds(get(r, "psl"))  # закрытие Pinnacle
+        oa, ob = (ol, ow) if swap else (ow, ol)
         out.append((mid, start, tour_name or None, tier, mid, 0, _id(key(a)), a, _id(key(b)), b, 0 if swap else 1,
-                    str(get(r, "surface") or "") or None, str(get(r, "comment") or "Completed")))
+                    str(get(r, "surface") or "") or None, str(get(r, "comment") or "Completed"), oa, ob))
     return out
+
+
+def _odds(v) -> float | None:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if x > 1 else None
 
 
 def read_xlsx(data: bytes) -> tuple[list, list]:
@@ -149,8 +176,9 @@ def sync(conn: sqlite3.Connection, client, years: int = 3, *, now: float | None 
     """Загружает таблицы ATP и WTA за последние years лет (текущий год — всегда заново). Возвращает новых матчей."""
     ensure_schema(conn)
     year = datetime.fromtimestamp(now or time.time(), timezone.utc).year
+    # год считаем загруженным, только если в нём уже есть коэффициенты (старые загрузки были без них)
     have = {y for (y,) in conn.execute(
-        "SELECT DISTINCT CAST(strftime('%Y', start_time, 'unixepoch') AS INTEGER) FROM tennis_maps")}
+        "SELECT DISTINCT CAST(strftime('%Y', start_time, 'unixepoch') AS INTEGER) FROM tennis_maps WHERE odds_r IS NOT NULL")}
     links = index_links(client) if fetch is None else {}
     if fetch is None and not links:
         log(f"  теннис: на {INDEX_URL} не нашёл ссылок на таблицы — пробую адреса по старой схеме")
@@ -167,8 +195,7 @@ def sync(conn: sqlite3.Connection, client, years: int = 3, *, now: float | None 
                 continue
             parsed = parse_rows(tour, header, rows)
             before, = conn.execute("SELECT COUNT(*) FROM tennis_maps").fetchone()
-            conn.executemany("INSERT OR REPLACE INTO tennis_maps VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", parsed)
-            conn.commit()
+            insert(conn, parsed)
             added += conn.execute("SELECT COUNT(*) FROM tennis_maps").fetchone()[0] - before
             log(f"  теннис {tour} {y}: матчей в таблице {len(parsed)}")
     return added
@@ -300,3 +327,70 @@ def collect_once(conn: sqlite3.Connection, pw, game, log=print) -> int:
     known = sum(1 for m in matches if key(m["team1"]) in index and key(m["team2"]) in index)
     log(f"  {game.label}: матчей {len(matches)} (оба игрока найдены в истории: {known}), новых/изменившихся цен {saved}")
     return saved
+
+
+# --- проверка модели против Pinnacle на истории ------------------------------------
+
+def backtest(conn: sqlite3.Connection, eval_days: int = 365, min_games: int = 30,
+             grid=((0.03, 0.10), (0.05, 0.10), (0.10, 0.10), (0.03, 0.05), (0.05, 0.05), (0.03, 1.0))) -> str:
+    """Честный прогон: веса модели — только на матчах до окна проверки, рейтинг — на матчах до каждого матча.
+
+    В окне проверки сравниваем модель с закрытием Pinnacle (вероятность без маржи) и «ставим» по 1
+    на каждый сигнал по закрывающему коэффициенту: EV ≥ порога и расхождение с рынком ≤ gap.
+    Закрытие — самая точная цена; если прибыли нет даже так, на более ранних ценах её тоже вряд ли будет.
+    """
+    from . import model as mm
+    from .rating import EloModel, evaluate
+
+    ms = maps(conn)
+    if not ms:
+        return "Истории тенниса нет. Запустите: bk sync-tennis"
+    eval_since = ms[-1]["start_time"] - eval_days * 86400
+    _, report = mm.train(ms, eval_since)
+    st = mm.FeatureState(elo=EloModel(k=report.k, half_life_days=report.half_life))
+    rows = []  # (время, признаки за r, r выиграл, коэфф. r, коэфф. d)
+    for m in ms:
+        r, d, t = m["radiant_team_id"], m["dire_team_id"], m["start_time"]
+        if st.elo.rating(r, t).games >= min_games and st.elo.rating(d, t).games >= min_games:
+            rows.append((t, st.features(r, d, t, m["patch"]), int(m["radiant_win"]), m.get("odds_r"), m.get("odds_d")))
+        win, lose = (r, d) if m["radiant_win"] else (d, r)
+        wn, ln = (m["radiant_name"], m["dire_name"]) if m["radiant_win"] else (m["dire_name"], m["radiant_name"])
+        st.update(win, lose, t, wn or "", ln or "", patch=m["patch"])
+    train_s = [(t, x, y, 0.0) for t, x, y, _, _ in rows if t < eval_since]
+    mask = [f in (report.selected or ["elo"]) for f in mm.FEATURES]
+    w = mm.fit_masked(train_s, mask)
+    val = [(t, x, y, o1, o2) for t, x, y, o1, o2 in rows if t >= eval_since and o1 and o2]
+    if not val:
+        return "В окне проверки нет матчей с коэффициентами Pinnacle. Обновите историю: bk sync-tennis"
+    ours, book = [], []
+    for _, x, y, o1, o2 in val:
+        p = mm._sigmoid(sum(a * b for a, b in zip(w, x)))
+        ours.append((p, y))
+        book.append((pw_mod._no_vig(o1, o2)[0], y))
+    e_m, e_b = evaluate(ours), evaluate(book)
+    margin = sum(1 / o1 + 1 / o2 - 1 for *_, o1, o2 in val) / len(val)
+    lines = [f"Теннис: проверка против закрытия Pinnacle за {eval_days} дней — {len(val)} матчей "
+             f"(у обоих игроков ≥ {min_games} матчей, веса модели — на {len(train_s)} более ранних).",
+             f"  наша модель: точность {e_m.accuracy:.1%}, log-loss {e_m.log_loss:.4f}",
+             f"  Pinnacle:    точность {e_b.accuracy:.1%}, log-loss {e_b.log_loss:.4f} (маржа в среднем {margin:.1%})",
+             "  (меньше log-loss — точнее; если у рынка меньше, в среднем он знает больше модели)",
+             "", "Ставки по 1 по закрывающему коэффициенту:",
+             f"{'EV от':>6} {'gap до':>7} {'ставок':>7} {'выигр.':>7} {'ROI':>7}"]
+    for min_ev, gap in grid:
+        n = won = 0
+        profit = 0.0
+        for (p, y), (q, _), (*_, o1, o2) in zip(ours, book, val):
+            best = None
+            for prob, fair, odds, hit in ((p, q, o1, y), (1 - p, 1 - q, o2, 1 - y)):
+                ev = prob * odds - 1
+                if ev >= min_ev and abs(prob - fair) <= gap and (best is None or ev > best[0]):
+                    best = (ev, odds, hit)
+            if best:
+                n += 1
+                won += best[2]
+                profit += best[1] - 1 if best[2] else -1
+        roi = f"{profit / n:+.1%}" if n else "—"
+        lines.append(f"{min_ev:>6.0%} {('любой' if gap >= 1 else f'{gap:.0%}'):>7} {n:>7} {won:>7} {roi:>7}")
+    lines += ["", "Сейчас в боте: EV от 3%, gap до 10%. Если ROI везде в минусе — модель против Pinnacle не выигрывает, "
+              "и теннисные сигналы стоит считать экспериментом."]
+    return "\n".join(lines)
