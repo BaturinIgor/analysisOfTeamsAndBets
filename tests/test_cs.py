@@ -116,7 +116,7 @@ def test_bot_shows_cs_section(tmp_path):
     conn = seeded(tmp_path)
     bot = Bot(conn, (ME,), Thresholds(0.03, max_gap=0.5), now=lambda: NOW)
     text = bot.handle(ME, "/today").text
-    assert "Матчи CS2 в линии:" in text and "Vitality — FaZe" in text
+    assert "CS2: линия" in text and "Vitali-FaZe" in text
     m = bot.handle(ME, "/match 1").text
     assert "(CS2)" in m and "только победу в матче" in m and "героев" not in m
     assert "CS2: Team Vitality" in bot.handle(ME, "/team Vitality")

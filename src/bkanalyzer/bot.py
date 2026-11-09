@@ -146,6 +146,12 @@ def _local(ts: str | None, tz: ZoneInfo) -> str:
     return dt.astimezone(tz).strftime("%d.%m %H:%M")
 
 
+def _short(name: str, width: int = 6) -> str:
+    """Короткое имя команды для таблицы: «Team Spirit» → «Spirit», «Tundra Esports» → «Tundra»."""
+    words = [w for w in (name or "?").split() if w.casefold() not in analysis.STOP_WORDS] or [name or "?"]
+    return max(words, key=len)[:width]
+
+
 def _pct(x: float | None) -> str:
     return "—" if x is None else f"{x:.0%}"
 
@@ -213,29 +219,67 @@ class Bot:
         return f"{head}\n   П1/П2 {odds}; {ours}{sig}"
 
     # --- команды ------------------------------------------------------------
+    def _row(self, n: int, a: Analysis) -> str:
+        """Строка таблицы /today (≈36 символов, влезает в экран телефона)."""
+        m = a.match
+        when = (m.score or "идёт") if m.phase == "live" else _local(m.start_time, self.tz)[-5:]
+        q1, q2 = m.price("match_winner", m.team1), m.price("match_winner", m.team2)
+        odds = f"{q1.price:>4.2f} {q2.price:>4.2f}" if q1 and q2 else f"{'—':>4} {'—':>4}"
+        ours = f"{a.p_series:>3.0%}" if a.p_series is not None else f"{'—':>3}"
+        mark = "*" if m.phase == "live" else " "
+        match = f"{_short(m.team1)}-{_short(m.team2)}"
+        return f"{mark}{n:>2} {when:<5} {match:<13} {odds} {ours}"
+
     def today(self, live_only: bool = False) -> str | Reply:
+        from html import escape
+
         items, maps = self._analyses(live_only)
         if not items:
             return "Сейчас в эфире матчей нет." if live_only else "В линии нет матчей. Проверьте, что запущен сбор: bk bot"
         self._last_list = [a.match.fixture_id for a in items]
-        lines = []
+        lines: list[str] = []
+        rows: list[str] = []
+        signals: list[str] = []
+        head = f"{'№':>3} {'Время':<5} {'Матч':<13} {'П1':>4} {'П2':>4} {'Мы':>3}"
+
+        def flush(label: str) -> None:
+            if rows:
+                lines.extend([("" if not lines else "\n") + f"<b>{escape(label)}</b>",
+                              "<pre>" + escape("\n".join([head, *rows])) + "</pre>"])
+                lines.extend(escape(s) for s in signals)
+                rows.clear()
+                signals.clear()
+
+        label, day = "", None
         for i, a in enumerate(items, 1):
-            if i == 1 or a.match.game != items[i - 2].match.game:
-                label = by_key(a.match.game).label
-                lines.append(("" if i == 1 else "\n") + (f"{label} в эфире:" if live_only else f"Матчи {label} в линии:"))
-            lines.append(self._line(i, a))
+            g = by_key(a.match.game)
+            new_label = f"{g.label} в эфире" if live_only else f"{g.label}: линия"
+            if new_label != label:
+                flush(label)
+                label, day = new_label, None
+            d = _local(a.match.start_time, self.tz)[:5]
+            if a.match.phase != "live" and d != day:
+                if day is not None:
+                    rows.append(f"{'':>3} {d}")
+                day = d
+            rows.append(self._row(i, a))
+            best = max(a.picks, key=lambda p: p.ev, default=None)
+            if best and self.thresholds.ok(best):
+                signals.append(f"✅ {i}. {best.team} {market_label(best.market)} @ {best.price:.2f}, EV {best.ev:+.0%}")
+        flush(label)
+        lines.append("\nМы — наша вероятность победы первой команды. * — в эфире (вместо времени счёт).")
         if not maps and any(a.match.game == "dota2" for a in items):
-            lines.append("\nИстории матчей Dota нет — оценки не будет. Запустите один раз: bk sync-matches")
+            lines.append("Истории матчей Dota нет — оценки не будет. Запустите один раз: bk sync-matches")
         for g in PANDASCORE:
             if any(a.match.game == g.key for a in items) and not self._models(g).get(self.conn)[1]:
-                lines.append(f"\nИстории {g.label} нет — оценки не будет. Нужен PANDASCORE_TOKEN в .env, затем: {g.sync_cmd}")
-        lines.append("\nПодробно — кнопки ниже (🔎 разбор, 📰 состав и новости).")
+                lines.append(f"Истории {g.label} нет — оценки не будет. Нужен PANDASCORE_TOKEN в .env, затем: {g.sync_cmd}")
+        lines.append("Подробно — кнопки ниже (🔎 разбор, 📰 состав и новости).")
         buttons = []
         for i, a in enumerate(items[:20], 1):
             fid = a.match.fixture_id
             label = f"{i}. {a.match.team1} — {a.match.team2}"
             buttons.append([(label[:40], f"m:{fid}"), ("📰", f"n:{fid}")])
-        return Reply("\n".join(lines), buttons=buttons)
+        return Reply("\n".join(lines), buttons=buttons, html=True)
 
     def _find(self, items: list[Analysis], arg: str) -> Analysis | None:
         target = next((a for a in items if a.match.fixture_id == arg), None)  # из кнопки
@@ -349,15 +393,20 @@ class Bot:
         fid = m.fixture_id
         return Reply("\n".join(lines), buttons=[[("📰 Состав и новости", f"n:{fid}"), ("🔄 Обновить", f"m:{fid}")]])
 
-    def value(self) -> str:
+    def value(self) -> str | Reply:
+        from html import escape
+
         items, _ = self._analyses()
         picks = [(a, p) for a in items for p in a.picks if self.thresholds.ok(p)]
         if not picks:
             return f"Сигналов нет (порог EV {self.thresholds.min_ev:.0%}). Ставки нет."
-        lines = ["Сигналы:"]
+        head = f"{'Ставка на':<13}{'Рынок':<7}{'Кф':>5}{'Наша':>5}{'EV':>5}"
+        rows = []
         for a, p in sorted(picks, key=lambda x: -x[1].ev):
-            lines.append(f"• {a.match.team1} — {a.match.team2}, {market_label(p.market)}: {p.team} @ {p.price:.2f}, наша {p.prob:.0%}, EV {p.ev:+.1%}")
-        return "\n".join(lines)
+            market = "матч" if p.market == "match_winner" else f"карта{p.market.split('_')[1]}" if p.market.startswith("map_") else p.market
+            rows.append(f"{p.team[:12]:<13}{market[:6]:<7}{p.price:>5.2f}{p.prob:>5.0%}{p.ev:>+5.0%}")
+            rows.append(f" {a.match.team1[:15]}—{a.match.team2[:15]}")
+        return Reply("✅ <b>Сигналы</b>\n<pre>" + escape("\n".join([head, *rows])) + "</pre>", html=True)
 
     def team(self, query: str) -> str:
         if not query:
@@ -467,7 +516,7 @@ class Bot:
             if cmd == "/settings":
                 return self.settings()
             if cmd == "/sim":
-                return simmod.report(self.conn, self.sim)
+                return Reply(simmod.report_html(self.conn, self.sim), html=True)
             if cmd == "/banks":
                 return Reply(simmod.banks_report(self.conn, self.sim), html=True)
             if cmd == "/export":
@@ -499,12 +548,14 @@ class Bot:
 
 
 def chunks(text: str, size: int = MAX_LEN) -> list[str]:
+    """Режет по строкам; таблица <pre>, попавшая на разрез, закрывается и открывается заново."""
     out, buf = [], ""
     for line in text.split("\n"):
-        if len(buf) + len(line) + 1 > size and buf:
-            out.append(buf)
-            buf = ""
-        buf = f"{buf}\n{line}" if buf else line
+        if len(buf) + len(line) + 1 > size - 12 and buf:
+            open_pre = buf.count("<pre>") > buf.count("</pre>")
+            out.append(buf + ("</pre>" if open_pre else ""))
+            buf = "<pre>" if open_pre else ""
+        buf = f"{buf}\n{line}" if buf and buf != "<pre>" else buf + line
     return out + ([buf] if buf else [])
 
 

@@ -411,7 +411,10 @@ def _money(x: float) -> str:
 MIN_BETS_FOR_VERDICT = 30
 
 
-SHORT_MODE = {"prematch": "до", "draft": "драфт", "live": "эфир", "cs_prematch": "CS до", "cs_live": "CS эф"}
+SHORT_MODE = {"prematch": "Dota до", "draft": "Dota драфт", "live": "Dota эфир", "cs_prematch": "CS2 до",
+              "cs_live": "CS2 эфир", "lol_prematch": "LoL до", "lol_live": "LoL эфир", "longshot": "Dota",
+              "cs_longshot": "CS2", "lol_longshot": "LoL"}
+MODE_W = 10  # ширина столбца режима в таблицах
 SHORT_STRATEGY = {"fixed": "фикс", "percent": "%банка", "kelly": "Келли"}
 
 
@@ -475,13 +478,13 @@ def banks_report(conn: sqlite3.Connection, cfg: SimSettings) -> str:
             for tot, s in zip(totals, sums):
                 tot[0] += s["profit"]
                 tot[1] += s["staked"]
-            table.append(f"{SHORT_MODE.get(mode, mode):<6}{m['won']:>2}-{m['lost']:<2}" + "".join(f"{s['profit']:>+7.0f}" for s in sums))
+            table.append(f"{SHORT_MODE.get(mode, mode):<{MODE_W}}{m['won']:>2}-{m['lost']:<2}" + "".join(f"{s['profit']:>+7.0f}" for s in sums))
         if not table:
             empty.append(name)
             continue
-        head = " " * 11 + "".join(f"{SHORT_STRATEGY.get(c.strategy, c.strategy):>7}" for c in strategies)
-        total = f"{'ИТОГО':<6}{won:>2}-{lost:<2}" + "".join(f"{p:>+7.0f}" for p, _ in totals)
-        roi = f"{'ROI':<11}" + "".join(f"{(p / st if st else 0):>+7.0%}" for p, st in totals)
+        head = " " * (MODE_W + 5) + "".join(f"{SHORT_STRATEGY.get(c.strategy, c.strategy):>7}" for c in strategies)
+        total = f"{'ИТОГО':<{MODE_W}}{won:>2}-{lost:<2}" + "".join(f"{p:>+7.0f}" for p, _ in totals)
+        roi = f"{'ROI':<{MODE_W + 5}}" + "".join(f"{(p / st if st else 0):>+7.0%}" for p, st in totals)
         out += ["", f"<b>{escape(name)}</b>: {escape(describe_thresholds(prof.thresholds))}",
                 "<pre>" + escape("\n".join([head, *table, "-" * len(head), total, roi])) + "</pre>"]
         if in_play:
@@ -504,6 +507,69 @@ def describe_thresholds(t: Thresholds | None) -> str:
     if t.min_games:
         parts.append(f"≥ {t.min_games} карт")
     return ", ".join(parts)
+
+
+def _cell(x: float | None, fmt: str, width: int) -> str:
+    return (format(x, fmt) if x is not None else "—").rjust(width)
+
+
+def report_html(conn: sqlite3.Connection, cfg: SimSettings) -> str:
+    """/sim в Telegram: таблицы в <pre> (HTML). Прибыль — по первой стратегии; все банки — в 💰 Банки."""
+    from html import escape
+
+    first = cfg.all()[0]
+    label = STRATEGY_LABEL.get(first.strategy, first.strategy)
+    out = [f"📊 <b>Симулятор</b> (старт {_money(cfg.bank)} у каждой стратегии)"]
+    rows, quiet, total = [], [], 0
+    for mode in MODES:
+        s = summary(conn, first if mode not in QUIET_MODES else strategies_for(cfg, mode)[0], mode)
+        if not s["bets"]:
+            continue
+        name = SHORT_MODE.get(mode, mode)[:MODE_W]
+        settled = [r for r in s["rows"] if r["status"] in ("won", "lost")]
+        if mode in QUIET_MODES:
+            book = [r["book_prob"] for r in settled if r["book_prob"] is not None]
+            quiet.append(f"{name:<6}{len(settled):>4}"
+                         + _cell(sum(r['status'] == 'won' for r in settled) / len(settled) if settled else None, ".0%", 6)
+                         + _cell(sum(r['prob'] for r in settled) / len(settled) if settled else None, ".0%", 7)
+                         + _cell(sum(book) / len(book) if book else None, ".0%", 6))
+            continue
+        total += s["won"] + s["lost"]
+        rows.append(f"{name:<{MODE_W}}{s['won']:>2}-{s['lost']:<2}{s['open']:>3}{s['profit']:>+7.0f}"
+                    + _cell(s["roi"] if settled else None, "+.0%", 6) + _cell(s["clv"], "+.0%", 5))
+    if rows:
+        head = f"{'Режим':<{MODE_W}}{'В-П':^5}{'Отк':>3}{'Приб.':>7}{'ROI':>6}{'CLV':>5}"
+        out += ["", "<pre>" + escape("\n".join([head, *rows])) + "</pre>",
+                f"Прибыль — {escape(label)}; ROI и CLV — по рассчитанным. Все стратегии — 💰 Банки."]
+    else:
+        out += ["", "Бумажных ставок пока нет."]
+    if quiet:
+        head = f"{'Игра':<6}{'Ст.':>4}{'Вышло':>6}{'Модель':>7}{'Рынок':>6}"
+        out += ["", "<b>На заметку</b> (модель далеко от рынка, без ставок):",
+                "<pre>" + escape("\n".join([head, *quiet])) + "</pre>"]
+    if cfg.experiments:
+        prof_rows = []
+        for prof in (cfg, *cfg.experiments):
+            c = prof.all()[0]
+            sums = [summary(conn, c, m) for m in MODES if m not in QUIET_MODES]
+            won, lost = sum(s["won"] for s in sums), sum(s["lost"] for s in sums)
+            profit, staked = sum(s["profit"] for s in sums), sum(s["staked"] for s in sums)
+            clv = [r["price"] / r["closing_price"] - 1 for s in sums for r in s["rows"]
+                   if r["status"] in ("won", "lost") and r.get("closing_price")]
+            prof_rows.append(f"{(prof.profile or 'Основной')[:9]:<9}{won:>3}-{lost:<3}{profit:>+7.0f}"
+                             + _cell(profit / staked if staked else None, "+.0%", 6)
+                             + _cell(sum(clv) / len(clv) if clv else None, "+.0%", 5))
+        head = f"{'Профиль':<9}{'В-П':^7}{'Приб.':>7}{'ROI':>6}{'CLV':>5}"
+        out += ["", "⚖️ <b>Сравнение настроек</b> (те же коэффициенты, разные пороги):",
+                "<pre>" + escape("\n".join([head, *prof_rows])) + "</pre>"]
+    recent = conn.execute(
+        "SELECT * FROM paper_bets WHERE strategy=? AND mode NOT IN ({}) ORDER BY id DESC LIMIT 5".format(
+            ",".join("?" * len(QUIET_MODES))), (first.key, *QUIET_MODES)).fetchall() if total or rows else []
+    if recent:
+        cols = [d[0] for d in conn.execute("SELECT * FROM paper_bets LIMIT 0").description]
+        out += ["", "<b>Последние ставки:</b>"] + [escape(bet_line(dict(zip(cols, r)))) for r in recent]
+    out.append(f"\nРассчитано ставок: {total} из 100 нужных для вывода о перевесе.")
+    return "\n".join(out)
 
 
 def compare_report(conn: sqlite3.Connection, cfg: SimSettings) -> str:

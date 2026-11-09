@@ -84,7 +84,8 @@ def test_settle_map_and_void(conn):
 def test_sim_command(conn):
     sim.place_bets(conn, analyses(conn), Thresholds(0.05), CFG, now=NOW)
     text = Bot(conn, (ME,), now=lambda: NOW, sim=CFG).handle(ME, "/sim")
-    assert "До матча: ставок 1 (открыто 1" in text and "⏳ Spirit — Tundra" in text and "из 100" in text
+    assert "Dota до    0-0   1" in text and "⏳ Spirit — Tundra" in text and "из 100" in text
+    assert "До матча: ставок 1 (открыто 1" in sim.report(conn, CFG)  # текстовый отчёт (bk sim) прежний
 
 
 def test_simulate_step_notifies(conn, monkeypatch):
@@ -229,7 +230,7 @@ def test_banks_report_and_button(conn):
     text = sim.banks_report(conn, cfg)
     assert "<b>Основной</b>" in text and "Фавориты: ставок пока нет" in text
     assert "Лучшая стратегия: пока нет рассчитанных ставок" in text
-    assert "<pre>" in text and "до     0-0      +0     +0" in text and "открыто ставок: 1" in text
+    assert "<pre>" in text and "Dota до    0-0      +0     +0" in text and "открыто ставок: 1" in text
     b = Bot(conn, (ME,), Thresholds(0.05), now=lambda: NOW, sim=cfg)
     r = b.handle(ME, "💰 Банки")
     assert r.html and "<pre>" in r.text
@@ -246,4 +247,4 @@ def test_leaderboard_orders_by_profit(conn):
     assert lines[0].startswith("🥇 Основной · % банка") and lines[1].startswith("🥈 Основной · фикс. сумма")
     assert "Рано судить" in lines[-1]
     text = sim.banks_report(conn, cfg)
-    assert "ИТОГО  1-0" in text and "ROI" in text
+    assert "ИТОГО      1-0" in text and "ROI" in text

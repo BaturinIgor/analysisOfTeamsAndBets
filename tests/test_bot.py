@@ -69,14 +69,14 @@ def test_whitelist(bot):
 
 def test_today_and_value(bot):
     text = bot.handle(ME, "/today")
-    assert "Spirit — Tundra" in text and "1.90 / 1.90" in text
-    assert "✅ Spirit матч" in text  # модель даёт Spirit больше 50% при коэффициенте 1.90
-    assert "🔴" in text and "Team Allied — Team Lynx (счёт 1:0)" in text
-    assert "нашей оценки нет" in text  # Allied/Lynx нет в Tier 1–2
+    assert "Spirit-Tundra" in text and "1.90 1.90" in text and "<pre>" in text
+    assert "✅ 2. Spirit матч" in text  # модель даёт Spirit больше 50% при коэффициенте 1.90
+    assert "* 1 1:0   Allied-Lynx" in text
+    assert "2.50   —" in text  # Allied/Lynx нет в Tier 1–2 — нашей оценки нет
     val = bot.handle(ME, "/value")
-    assert "Spirit @ 1.90" in val and "Tundra" in val
+    assert "<pre>" in val and "Spirit       матч    1.90" in val and "Tundra" in val
     live = bot.handle(ME, "/live")
-    assert "Spirit" not in live and "Team Allied" in live
+    assert "Spirit" not in live.text.split("</pre>")[0] and "Allied-Lynx" in live
 
 
 def test_match_detail(bot):
@@ -215,7 +215,7 @@ def test_buttons_menu_and_callbacks(bot):
     start = bot.handle(ME, "/start")
     assert isinstance(start, Reply) and reply_markup(start)["keyboard"][0][0]["text"] == "📋 Матчи"
     today = bot.handle(ME, "📋 Матчи")  # кнопка меню = /today
-    assert "Матчи Dota 2 в линии" in today
+    assert "Dota 2: линия" in today
     kb = reply_markup(today)["inline_keyboard"]
     data = {b["callback_data"] for row in kb for b in row}
     assert {"m:e1", "n:e1", "m:e2"} <= data
