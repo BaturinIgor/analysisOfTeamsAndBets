@@ -260,9 +260,13 @@ def analyze(bm: BoardMatch, model, now: int | None = None) -> Analysis:
         res.p_draw = draw_from_score(p, won, lost)
     # в эфире текущая карта уже идёт — рейтинг не знает, что на ней происходит; берём следующую
     next_map = won + lost + (2 if bm.phase == "live" else 1)
-    outcomes = [("match_winner", bm.team1, res.p_series), ("match_winner", bm.team2, res.p_series2)]
-    if res.p_draw is not None and bm.draw_outcome:
-        outcomes.append(("match_winner", bm.draw_outcome, res.p_draw))
+    outcomes = []
+    # в эфире на серию не ставим: идущая карта для нас «не начата», а рынок уже видит её ход
+    # (команда проигрывает карту → коэффициент на серию растёт → у нас ложный перевес)
+    if bm.phase != "live":
+        outcomes = [("match_winner", bm.team1, res.p_series), ("match_winner", bm.team2, res.p_series2)]
+        if res.p_draw is not None and bm.draw_outcome:
+            outcomes.append(("match_winner", bm.draw_outcome, res.p_draw))
     if by_key(bm.game).map_markets and (bo > 1 or bm.phase != "live"):
         outcomes += [(f"map_{next_map}_winner", bm.team1, p), (f"map_{next_map}_winner", bm.team2, 1 - p)]
     for market, team, team_prob in outcomes:

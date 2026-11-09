@@ -89,7 +89,7 @@ def suggest(name: str, names: dict[str, tuple[str, int]], n: int = 3) -> list[st
     return [names[k][0] for k in close[:n]]
 
 
-def unmatched(conn: sqlite3.Connection, model, game=None) -> list[tuple[str, list[str]]]:
+def unmatched(conn: sqlite3.Connection, model, game=None, now=None) -> list[tuple[str, list[str]]]:
     """Команды из текущей линии игры, которых нет в истории модели, и похожие названия."""
     from .games import DOTA
 
@@ -97,7 +97,7 @@ def unmatched(conn: sqlite3.Connection, model, game=None) -> list[tuple[str, lis
     load(conn)
     names = history_names(conn, (game.maps_table,))
     seen, out = set(), []
-    for bm in analysis.load_board(conn, since_hours=48, game=game):
+    for bm in analysis.load_board(conn, since_hours=48, now=now, game=game):
         for team in (bm.team1, bm.team2):
             if team in seen:
                 continue

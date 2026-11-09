@@ -20,14 +20,14 @@ def conn(tmp_path):
 
 def test_alias_links_team_names(conn):
     model, _ = ModelCache().get(conn)
-    missing = dict(aliases.unmatched(conn, model))
+    missing = dict(aliases.unmatched(conn, model, now=NOW))
     assert "TS.Ultra" in missing
     with pytest.raises(ValueError, match="нет в истории"):
         aliases.add(conn, "TS.Ultra", "Team Spirrit")
     assert aliases.add(conn, "TS.Ultra", "Team Spirit") == "Team Spirit"
     assert aliases.listing(conn) == [("TS.Ultra", "Team Spirit")]
     assert analysis.match_team(model, "TS.Ultra")[1].name == "Team Spirit"
-    assert "TS.Ultra" not in dict(aliases.unmatched(conn, model))
+    assert "TS.Ultra" not in dict(aliases.unmatched(conn, model, now=NOW))
     text = Bot(conn, (ME,), now=lambda: NOW).handle(ME, "/match ultra")
     assert "Наша вероятность" in text
     assert aliases.remove(conn, "TS.Ultra") and analysis.ALIASES == {}

@@ -162,7 +162,7 @@ def test_guards(tmp_path):
     t = Thresholds(0.05)
     assert t.suspicious(Pick("match_winner", "A", 3.8, 0.51, 0.26)) and not t.ok(Pick("match_winner", "A", 3.8, 0.51, 0.26))
     assert t.ok(Pick("match_winner", "A", 2.0, 0.6, 0.5))
-    # в эфире при счёте 1:0 идёт карта 2 — ставим только на карту 3 и матч
+    # в эфире при счёте 1:0 идёт карта 2 — ставим только на карту 3 (на серию в эфире не ставим)
     m = rating.EloModel()
     m.update(1, 2, 0, "Team Allied", "Team Lynx")
     from bkanalyzer.analysis import BoardMatch, Quote
@@ -170,7 +170,7 @@ def test_guards(tmp_path):
     for mk in ("map_2_winner", "map_3_winner", "match_winner"):
         bm.quotes[mk] = {n: Quote(mk, n, 2.0, 0.5, "t") for n in ("Team Allied", "Team Lynx")}
     markets = {p.market for p in analysis.analyze(bm, m, 0).picks}
-    assert markets == {"match_winner", "map_3_winner"}
+    assert markets == {"map_3_winner"}
 
 
 def test_closed_market_hidden(tmp_path):
