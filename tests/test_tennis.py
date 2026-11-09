@@ -145,7 +145,7 @@ def test_sync_reads_years(tmp_path):
         added = tennis.sync(conn, None, 2, now=NOW.timestamp(), log=lambda *_: None, fetch=fetch)
     finally:
         t.read_xlsx = orig
-    assert added == 12 and "http://www.tennis-data.co.uk/2026w/2026.xlsx" in seen and len(seen) == 4
+    assert added == 12 and "https://tennis-data.co.uk/2026w/2026.xlsx" in seen and len(seen) == 4
 
 
 def test_settings_and_pinnwire_client():
@@ -160,3 +160,13 @@ def test_settings_and_pinnwire_client():
     pw = PinnWire(httpx.Client(transport=httpx.MockTransport(handler)), "k")
     assert len(pw.fixtures()["events"]) == 3
     assert seen == {"key": "k", "path": "/kit/v1/prematch/fixtures", "sport": "2"}
+
+
+def test_index_links():
+    html = """<a href="hrjk-85HytOjkhth76j_ygh4jf7/2025/2025.xlsx">2025</a>
+              <a href='https://tennis-data.co.uk/hrjk-85HytOjkhth76j_ygh4jf7/2025w/2025.xlsx'>WTA</a>
+              <a href="2009/2009.xls">old</a>"""
+    links = tennis.parse_index(html)
+    assert links == {("ATP", 2025): "https://tennis-data.co.uk/hrjk-85HytOjkhth76j_ygh4jf7/2025/2025.xlsx",
+                     ("WTA", 2025): "https://tennis-data.co.uk/hrjk-85HytOjkhth76j_ygh4jf7/2025w/2025.xlsx"}
+    assert tennis.urls(2025, links)[1][1].endswith("/2025w/2025.xlsx") and "hrjk" in tennis.urls(2025, links)[1][1]

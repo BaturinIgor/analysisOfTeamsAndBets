@@ -95,7 +95,7 @@ def check_sources(s: Settings, client=None) -> int:
         def tennis_data():
             from . import tennis
 
-            header, rows = tennis.read_xlsx(tennis._download(client, tennis.urls(date.today().year)[0][1]))
+            header, rows = tennis.read_xlsx(tennis._download(client, tennis.urls(date.today().year, tennis.index_links(client))[0][1]))
             parsed = tennis.parse_rows("ATP", header, rows)
             last = max((r[1] for r in parsed), default=None)
             return f"ATP {date.today().year}: матчей {len(parsed)}, последний день {date.fromtimestamp(last) if last else '—'}"
