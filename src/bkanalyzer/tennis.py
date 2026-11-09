@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS tennis_maps (
 CREATE INDEX IF NOT EXISTS ix_tennis_maps_time ON tennis_maps (start_time);
 """
 
-BASE_URL = "http://www.tennis-data.co.uk"
+BASE_URL = "https://tennis-data.co.uk"
+INDEX_URL = f"{BASE_URL}/alldata.php"  # страница со списком файлов: адреса в ней с меткой, которая может меняться
 SETTLE_DAYS = 10  # результаты приходят раз в неделю — ставки ждут дольше, чем в киберспорте
 
 
@@ -63,8 +64,30 @@ def _id(text: str) -> int:
     return int(hashlib.md5(text.encode()).hexdigest()[:12], 16)
 
 
-def urls(year: int) -> list[tuple[str, str]]:
-    return [("ATP", f"{BASE_URL}/{year}/{year}.xlsx"), ("WTA", f"{BASE_URL}/{year}w/{year}.xlsx")]
+def urls(year: int, links: dict[tuple[str, int], str] | None = None) -> list[tuple[str, str]]:
+    """Адреса таблиц года: из страницы со списком файлов, а если её нет — по старой схеме."""
+    links = links or {}
+    return [("ATP", links.get(("ATP", year), f"{BASE_URL}/{year}/{year}.xlsx")),
+            ("WTA", links.get(("WTA", year), f"{BASE_URL}/{year}w/{year}.xlsx"))]
+
+
+def parse_index(html: str, base: str = BASE_URL) -> dict[tuple[str, int], str]:
+    """Ссылки вида …/2025/2025.xlsx (ATP) и …/2025w/2025.xlsx (WTA) со страницы alldata.php."""
+    from urllib.parse import urljoin
+
+    out: dict[tuple[str, int], str] = {}
+    for href in re.findall(r"""href\s*=\s*["']([^"']+\.xlsx)["']""", html, flags=re.I):
+        m = re.search(r"/(\d{4})(w?)/(\d{4})\.xlsx$", href, flags=re.I)
+        if m and m.group(1) == m.group(3):
+            out.setdefault(("WTA" if m.group(2) else "ATP", int(m.group(1))), urljoin(base + "/", href))
+    return out
+
+
+def index_links(client) -> dict[tuple[str, int], str]:
+    try:
+        return parse_index(_download(client, INDEX_URL).decode("utf-8", "replace"))
+    except SourceError:
+        return {}
 
 
 def _ts(value) -> int | None:
@@ -128,12 +151,15 @@ def sync(conn: sqlite3.Connection, client, years: int = 3, *, now: float | None 
     year = datetime.fromtimestamp(now or time.time(), timezone.utc).year
     have = {y for (y,) in conn.execute(
         "SELECT DISTINCT CAST(strftime('%Y', start_time, 'unixepoch') AS INTEGER) FROM tennis_maps")}
+    links = index_links(client) if fetch is None else {}
+    if fetch is None and not links:
+        log(f"  теннис: на {INDEX_URL} не нашёл ссылок на таблицы — пробую адреса по старой схеме")
     fetch = fetch or (lambda url: _download(client, url))
     added = 0
     for y in range(year - years + 1, year + 1):
         if y in have and y < year:
             continue  # прошлые годы не меняются
-        for tour, url in urls(y):
+        for tour, url in urls(y, links):
             try:
                 header, rows = read_xlsx(fetch(url))
             except SourceError as exc:
