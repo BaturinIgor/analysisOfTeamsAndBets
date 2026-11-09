@@ -90,6 +90,9 @@ def is_singles(event: dict) -> bool:
     home, away = str(event.get("home") or ""), str(event.get("away") or "")
     if not home or not away or "/" in home or "/" in away:
         return False
+    units = str(event.get("units") or "Sets").casefold()
+    if units not in ("sets", ""):  # у Pinnacle рядом бывают события «в геймах» — это не победа в матче
+        return False
     text = f"{home} {away} {event.get('league_name') or ''}".casefold()
     return not any(w in text for w in ("doubles", "(sets)", "(games)", "set winner", "specials"))
 

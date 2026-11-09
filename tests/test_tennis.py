@@ -76,6 +76,7 @@ def seeded(tmp_path):
 def test_pinnwire_filters():
     evs = PW_EVENTS["events"]
     assert is_singles(evs[0]) and not is_singles(evs[1])
+    assert is_singles({**evs[0], "units": "Sets"}) and not is_singles({**evs[0], "units": "Games"})
     assert money_line(evs[0]) == (1.9, 2.0) and money_line(evs[2]) is None
 
 
