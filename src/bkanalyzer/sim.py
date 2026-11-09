@@ -65,9 +65,18 @@ class SimSettings:
     kelly: float = 1.0           # доля Келли (с потолком max_stake_share)
     max_stake_share: float = 0.1  # не больше 10% банка в одной ставке
     strategies: tuple = ()       # параллельные стратегии; пусто — только strategy
+    # Эксперимент (SIM_EXPERIMENTS): свои пороги сигнала и свои банки на тех же коэффициентах.
+    # Ставки эксперимента лежат в той же таблице, стратегия записана как «профиль:стратегия».
+    profile: str = ""
+    thresholds: Thresholds | None = None
+    experiments: tuple = ()      # у основного профиля: SimSettings экспериментов
+
+    @property
+    def key(self) -> str:
+        return f"{self.profile}:{self.strategy}" if self.profile else self.strategy
 
     def all(self) -> list["SimSettings"]:
-        return [replace(self, strategy=name, strategies=()) for name in (self.strategies or (self.strategy,))]
+        return [replace(self, strategy=name, strategies=(), experiments=()) for name in (self.strategies or (self.strategy,))]
 
     def describe(self) -> str:
         parts = {"fixed": f"фикс. {self.stake:.0f}", "percent": f"{self.percent:.0%} банка", "kelly": f"Келли ×{self.kelly:g}"}
@@ -86,8 +95,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 def bank(conn: sqlite3.Connection, mode: str, cfg: SimSettings) -> float:
     """Банк стратегии в режиме = стартовый + прибыль по рассчитанным − суммы открытых ставок."""
     q = "SELECT COALESCE(SUM({}), 0) FROM paper_bets WHERE mode=? AND strategy=? AND status {}"
-    settled = conn.execute(q.format("profit", "IN ('won','lost','void')"), (mode, cfg.strategy)).fetchone()[0]
-    open_stakes = conn.execute(q.format("stake", "= 'open'"), (mode, cfg.strategy)).fetchone()[0]
+    settled = conn.execute(q.format("profit", "IN ('won','lost','void')"), (mode, cfg.key)).fetchone()[0]
+    open_stakes = conn.execute(q.format("stake", "= 'open'"), (mode, cfg.key)).fetchone()[0]
     return cfg.bank + settled - open_stakes
 
 
@@ -111,7 +120,9 @@ def place_pick(conn: sqlite3.Connection, a: Analysis, pick, mode: str, cfg: SimS
     """
     ensure_schema(conn)
     now = now or datetime.now(timezone.utc)
-    if conn.execute("SELECT 1 FROM paper_bets WHERE fixture_id=? AND mode=?", (a.match.fixture_id, mode)).fetchone():
+    keys = [c.key for c in cfg.all()]
+    if conn.execute(f"SELECT 1 FROM paper_bets WHERE fixture_id=? AND mode=? AND strategy IN ({', '.join('?' * len(keys))})",
+                    (a.match.fixture_id, mode, *keys)).fetchone():
         return None
     if result_known(conn, a, pick):
         return None  # исход уже есть в OpenDota — линия устарела, ставить нельзя
@@ -125,13 +136,13 @@ def place_pick(conn: sqlite3.Connection, a: Analysis, pick, mode: str, cfg: SimS
             "created_at": now.isoformat(timespec="seconds"), "mode": mode, "fixture_id": a.match.fixture_id,
             "start_time": a.match.start_time, "team1": a.match.team1, "team2": a.match.team2,
             "market": pick.market, "pick": pick.team, "price": pick.price, "prob": pick.prob,
-            "book_prob": pick.book_prob, "stake": stake, "bank_before": b, "strategy": c.strategy,
+            "book_prob": pick.book_prob, "stake": stake, "bank_before": b, "strategy": c.key,
         }
         conn.execute(f"INSERT INTO paper_bets ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
         stakes[c.strategy] = stake
         first = first or row
     conn.commit()
-    return {**first, "ev": pick.ev, "stakes": stakes} if first else None
+    return {**first, "ev": pick.ev, "stakes": stakes, "profile": cfg.profile} if first else None
 
 
 def place_bets(conn: sqlite3.Connection, analyses: list[Analysis], thresholds: Thresholds, cfg: SimSettings,
@@ -308,7 +319,7 @@ def summary(conn: sqlite3.Connection, cfg: SimSettings, mode: str) -> dict:
     ensure_schema(conn)
     conn.row_factory = sqlite3.Row
     rows = [dict(r) for r in conn.execute("SELECT * FROM paper_bets WHERE mode=? AND strategy=? ORDER BY id",
-                                          (mode, cfg.strategy)).fetchall()]
+                                          (mode, cfg.key)).fetchall()]
     conn.row_factory = None
     settled = [r for r in rows if r["status"] in ("won", "lost")]
     staked = sum(r["stake"] for r in settled)
@@ -386,11 +397,80 @@ def report(conn: sqlite3.Connection, cfg: SimSettings) -> str:
         for r in main["rows"][-5:]:
             lines.append("  " + bet_line(r, with_stake=len(sums) == 1))
     lines.append(f"\nРассчитано ставок: {total} из 100 нужных для вывода о перевесе.")
+    if cfg.experiments:
+        lines.append(compare_report(conn, cfg))
     return "\n".join(lines)
 
 
+def describe_thresholds(t: Thresholds | None) -> str:
+    if t is None:
+        return ""
+    parts = [f"EV ≥ {t.min_ev:.0%}"]
+    if t.min_prob > 0:
+        parts.append(f"наша ≥ {t.min_prob:.0%}")
+    if t.min_odds > 1:
+        parts.append(f"кф ≥ {t.min_odds:g}")
+    parts.append(f"разрыв ≤ {t.max_gap * 100:.0f} п.п.")
+    if t.min_games:
+        parts.append(f"≥ {t.min_games} карт")
+    return ", ".join(parts)
+
+
+def compare_report(conn: sqlite3.Connection, cfg: SimSettings) -> str:
+    """Основной профиль и эксперименты рядом: одни и те же коэффициенты, разные пороги."""
+    lines = ["\n⚖️ Сравнение настроек (у каждой свои банки по {:.0f})".format(cfg.bank)]
+    for prof in (cfg, *cfg.experiments):
+        name = prof.profile or "Основной"
+        lines.append(f"\n{name}: {describe_thresholds(prof.thresholds)}")
+        any_bets = False
+        for mode in MODES:
+            if mode in QUIET_MODES:
+                continue
+            sums = [summary(conn, c, mode) for c in prof.all()]
+            main = sums[0]
+            if not main["bets"]:
+                continue
+            any_bets = True
+            head = f"  {MODE_LABEL[mode]}: {main['bets']} (✅ {main['won']} ❌ {main['lost']}, открыто {main['open']})"
+            if main["won"] + main["lost"]:
+                money = ", ".join(f"{STRATEGY_LABEL.get(s['strategy'], s['strategy'])} {s['profit']:+.0f}" for s in sums)
+                head += f"; {money}; ROI {main['roi']:+.1%}"
+                if main["clv"] is not None:
+                    head += f", CLV {main['clv']:+.1%}"
+            lines.append(head)
+        if not any_bets:
+            lines.append("  ставок пока нет")
+    return "\n".join(lines)
+
+
+EXP_KEYS = {"ev": "min_ev", "prob": "min_prob", "odds": "min_odds", "gap": "max_gap", "games": "min_games"}
+
+
+def parse_experiments(raw: str, base: Thresholds) -> list[tuple[str, Thresholds]]:
+    """«Фавориты: prob=0.5; Строгий: prob=0.5 ev=0.04 gap=0.06 games=50» → [(имя, пороги)].
+
+    Не указанные пороги берутся из основных (SIGNAL_*).
+    """
+    out = []
+    for chunk in raw.split(";"):
+        if not chunk.strip():
+            continue
+        name, _, params = chunk.partition(":")
+        name = name.strip()
+        if not name:
+            raise ValueError(f"SIM_EXPERIMENTS: нет имени в «{chunk.strip()}»")
+        changes = {}
+        for item in params.split():
+            k, _, v = item.partition("=")
+            if k not in EXP_KEYS or not v:
+                raise ValueError(f"SIM_EXPERIMENTS: непонятно «{item}» (можно {', '.join(EXP_KEYS)})")
+            changes[EXP_KEYS[k]] = int(v) if k == "games" else float(v)
+        out.append((name, replace(base, **changes)))
+    return out
+
+
 def placed_message(b: dict) -> str:
-    stakes = b.get("stakes") or {b["strategy"]: b["stake"]}
+    stakes = b.get("stakes") or {b["strategy"].rpartition(":")[2]: b["stake"]}
     amount = (f"сумма {b['stake']:.0f}" if len(stakes) == 1 else
               "суммы: " + ", ".join(f"{STRATEGY_LABEL.get(k, k)} {v:.0f}" for k, v in stakes.items()))
     return (f"📝 Бумажная ставка ({MODE_LABEL[b['mode']]}): {b['team1']} — {b['team2']}, {market_label(b['market'])}: "
@@ -412,6 +492,6 @@ def settled_messages(done: list[dict]) -> list[str]:
             out.append(settled_message(bets[0]))
             continue
         b = bets[0]
-        profits = ", ".join(f"{STRATEGY_LABEL.get(x['strategy'], x['strategy'])} {x['profit']:+.0f}" for x in bets)
+        profits = ", ".join(f"{STRATEGY_LABEL.get(x['strategy'].rpartition(':')[2], x['strategy'])} {x['profit']:+.0f}" for x in bets)
         out.append(f"{bet_line(b, with_stake=False)} ({b['note']}); прибыль: {profits}")
     return out

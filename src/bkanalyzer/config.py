@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -30,12 +30,16 @@ class Settings:
     sim_percent: float = 0.07
     sim_kelly: float = 1.0
     sim_strategies: tuple = ("fixed", "percent", "kelly")
+    sim_experiments: str = ""     # SIM_EXPERIMENTS, см. .env.example
 
     def sim(self):
-        from .sim import SimSettings
+        from .sim import SimSettings, parse_experiments
 
-        return SimSettings(self.sim_bank, self.sim_strategy, self.sim_stake, self.sim_percent, self.sim_kelly,
-                           strategies=self.sim_strategies)
+        base = SimSettings(self.sim_bank, self.sim_strategy, self.sim_stake, self.sim_percent, self.sim_kelly,
+                           strategies=self.sim_strategies, thresholds=self.thresholds())
+        exps = tuple(replace(base, profile=name, thresholds=t)
+                     for name, t in parse_experiments(self.sim_experiments, self.thresholds()))
+        return replace(base, experiments=exps)
 
     @property
     def games(self):
@@ -56,6 +60,10 @@ class Settings:
     @property
     def user_agent(self) -> str:
         return f"bkanalyzer/0.1 (personal use; {self.contact})"
+
+
+# Эксперименты по умолчанию (2026-11-09): Dota-проигрыши были на аутсайдерах, где модель выше рынка.
+DEFAULT_EXPERIMENTS = "Фавориты: prob=0.5; Строгий: prob=0.5 ev=0.04 gap=0.06 games=50"
 
 
 def _ids(raw: str) -> tuple[int, ...]:
@@ -86,6 +94,7 @@ def load_settings(env_file: str | os.PathLike | None = ".env") -> Settings:
         sim_percent=float(g("SIM_PERCENT", "") or 0.07),
         sim_kelly=float(g("SIM_KELLY", "") or 1.0),
         sim_strategies=tuple(x.strip().lower() for x in (g("SIM_STRATEGIES", "") or "fixed,percent,kelly").split(",") if x.strip()),
+        sim_experiments=g("SIM_EXPERIMENTS", DEFAULT_EXPERIMENTS),
         telegram_bot_token=g("TELEGRAM_BOT_TOKEN", ""),
         telegram_allowed_ids=_ids(g("TELEGRAM_ALLOWED_IDS", "")),
         telegram_proxy=g("TELEGRAM_PROXY", ""),
