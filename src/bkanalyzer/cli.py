@@ -81,6 +81,26 @@ def check_sources(s: Settings, client=None) -> int:
             return "; ".join(out)
 
         results.append(_check("PandaScore CS2 и LoL", pandascore))
+    if s.pinnwire_api_key:
+        def pinnwire():
+            from .sources.pinnwire import PinnWire, events, is_singles, money_line
+
+            pw = PinnWire(client, s.pinnwire_api_key)
+            used, limit = pw.budget()
+            evs = [e for e in events(pw.fixtures()) if is_singles(e) and money_line(e)]
+            return f"квота {used}/{limit}; теннисных матчей с коэффициентами: {len(evs)}"
+
+        results.append(_check("PinnWire теннис", pinnwire))
+
+        def tennis_data():
+            from . import tennis
+
+            header, rows = tennis.read_xlsx(tennis._download(client, tennis.urls(date.today().year)[0][1]))
+            parsed = tennis.parse_rows("ATP", header, rows)
+            last = max((r[1] for r in parsed), default=None)
+            return f"ATP {date.today().year}: матчей {len(parsed)}, последний день {date.fromtimestamp(last) if last else '—'}"
+
+        results.append(_check("tennis-data.co.uk", tennis_data))
     ok = sum(results)
     print(f"\nИтого: {ok} из {len(results)} проверок прошли.")
     return 0 if ok == len(results) else 1
@@ -219,18 +239,26 @@ def simulate_step(s: Settings, conn, models, od=None, last_sync: list | None = N
     for game in s.games:
         if game is DOTA:
             continue
-        if last_sync is not None and time.monotonic() - synced.get(game.key, float("-inf")) > 3600:
+        every = 6 * 3600 if game.single else 3600  # теннисные таблицы обновляются раз в неделю
+        if last_sync is not None and time.monotonic() - synced.get(game.key, float("-inf")) > every:
             try:
-                from . import cs
-                from .sources.pandascore import PandaScore
+                if game.feed == "pinnwire":
+                    from . import tennis
 
-                added = cs.sync(conn, PandaScore(make_client(s.user_agent), s.pandascore_token), 365, log=lambda *_: None,
-                                game=game)
+                    added = tennis.sync(conn, make_client(s.user_agent), 1, log=lambda *_: None)
+                    where = "tennis-data.co.uk"
+                else:
+                    from . import cs
+                    from .sources.pandascore import PandaScore
+
+                    added = cs.sync(conn, PandaScore(make_client(s.user_agent), s.pandascore_token), 365, log=lambda *_: None,
+                                    game=game)
+                    where = "PandaScore"
                 synced[game.key] = time.monotonic()
                 if added:
-                    log(f"  новых карт {game.label} из PandaScore: {added}")
+                    log(f"  новых матчей {game.label} из {where}: {added}")
             except SourceError as exc:
-                log(f"  PandaScore {game.label}: {exc}")
+                log(f"  история {game.label}: {exc}")
         cache = caches.get(game.key)
         if cache is None:
             cache = caches[game.key] = ModelCache(game=game)
@@ -326,28 +354,48 @@ def run_collector(s: Settings, conn, interval: int = 600, maps: bool = True, onc
 
     ow = OddiWire(make_client(s.user_agent), s.oddiwire_api_key)
     models, last_sync, drafts_seen = ModelCache(), [0.0], set()
+    pw_games = [g for g in s.games if g.feed == "pinnwire"]
+    oddin_games = [g for g in s.games if g.feed == "oddiwire"]
+    pw, pw_next = None, 0.0
+    if pw_games:
+        from .sources.pinnwire import PinnWire
+
+        pw = PinnWire(make_client(s.user_agent), s.pinnwire_api_key)
     od = OpenDota(make_client(s.user_agent), s.opendota_api_key) if simulate else None
     if not s.oddiwire_api_key:
         log("ODDIWIRE_API_KEY не задан: работаем на общем демо-ключе (10 запросов за 5 минут на всех).")
-    if len(s.games) > 1:
-        log("Собираем линию: " + ", ".join(g.label for g in s.games) + " (квота OddiWire делится на все игры).")
+    if len(oddin_games) > 1:
+        log("Собираем линию: " + ", ".join(g.label for g in oddin_games) + " (квота OddiWire делится на все игры).")
+    if pw_games:
+        log("Теннис: линия Pinnacle из PinnWire (своя квота, 1 запрос на снимок, не чаще раза в 30 минут).")
     while not stop():
         pause = float(interval)
+        if pw is not None and time.monotonic() >= pw_next:  # теннис: своя квота PinnWire, ошибки не мешают OddiWire
+            from . import tennis
+
+            try:
+                for game in pw_games:
+                    tennis.collect_once(conn, pw, game, log=log)
+                pw_next = time.monotonic() + 1800
+            except RateLimited as exc:
+                pw_next = time.monotonic() + exc.retry_after + 5
+                log(f"{time.strftime('%H:%M:%S')} {exc}")
+            except SourceError as exc:
+                pw_next = time.monotonic() + 1800
+                log(f"{time.strftime('%H:%M:%S')} теннис: {exc}")
         try:
             before, limit = ow.budget()
             n = 0
-            for game in s.games:  # Dota первой: её драфт и карты важнее
-                used_now, _ = ow.budget() if game is not s.games[0] else (before, limit)
+            for game in oddin_games:  # Dota первой: её драфт и карты важнее
+                used_now, _ = ow.budget() if game is not oddin_games[0] else (before, limit)
                 # у CS2 и LoL список «в эфире» спрашиваем, только когда их матч идёт или вот-вот начнётся
-                live = game is s.games[0] or live_expected(conn, game, ahead=int(interval) * 3)
+                live = game is oddin_games[0] or live_expected(conn, game, ahead=int(interval) * 3)
                 n += collect_oddiwire_once(conn, ow, maps=maps, max_calls=max(0, limit - used_now), log=log, game=game, live=live)
             used, limit = ow.budget()
             # сколько запросов реально ушло на снимок (после полуночи UTC счётчик обнуляется)
             spent = used - before if used >= before else used
             pause = next_pause(used, limit, min_interval=interval, per_snapshot=max(1, spent))
             log(f"{time.strftime('%H:%M:%S')} сохранено {n}; квота {used}/{limit}; следующий снимок через {pause / 60:.0f} мин")
-            if simulate:
-                simulate_step(s, conn, models, od, last_sync, notify, log)
         except RateLimited as exc:
             pause = exc.retry_after + 5
             log(f"{time.strftime('%H:%M:%S')} {exc}")
@@ -356,6 +404,11 @@ def run_collector(s: Settings, conn, interval: int = 600, maps: bool = True, onc
             ow.reset()
         except Exception as exc:  # сбор не должен останавливаться из-за ошибки анализа
             log(f"{time.strftime('%H:%M:%S')} сбой: {exc!r}")  # сессия MCP могла истечь — следующий снимок откроет новую
+        if simulate:  # ставки и расчёт — даже если OddiWire сейчас недоступен (теннис идёт из PinnWire)
+            try:
+                simulate_step(s, conn, models, od, last_sync, notify, log)
+            except Exception as exc:
+                log(f"{time.strftime('%H:%M:%S')} симулятор: {exc!r}")
         if once:
             return 0
         deadline = time.monotonic() + pause
@@ -707,6 +760,9 @@ def main(argv: list[str] | None = None) -> int:
     p_cs.add_argument("--days", type=int, default=365)
     p_lol = sub.add_parser("sync-lol", help="загрузить историю серий League of Legends из PandaScore (нужен PANDASCORE_TOKEN)")
     p_lol.add_argument("--days", type=int, default=365)
+    p_ten = sub.add_parser("sync-tennis", help="загрузить историю ATP/WTA с tennis-data.co.uk (без ключа)")
+    p_ten.add_argument("--years", type=int, default=3)
+    sub.add_parser("pinnwire-sample", help="проверить PinnWire (линия Pinnacle): сохранить ответ по теннису в data/pinnwire_sample.json")
 
     p_re = sub.add_parser("rating-eval", help="проверить рейтинг на истории и показать топ команд")
     p_re.add_argument("--eval-days", type=int, default=180, help="за сколько последних дней оценивать прогнозы")
@@ -797,6 +853,39 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Про-игроков: {news.sync_pro_players(conn, od)}")
             print("Составы Tier 1–2 (пакетами по 400 карт):")
             print(f"Карт с составом добавлено: {details.sync_players(conn, od)}")
+        return 0
+
+    if args.cmd == "sync-tennis":
+        from . import tennis
+
+        conn = db.connect(Path(s.db_path))
+        added = tennis.sync(conn, make_client(s.user_agent), args.years)
+        total, = conn.execute("SELECT COUNT(*) FROM tennis_maps").fetchone()
+        print(f"Новых матчей: {added}; всего {total}. Проверка модели: bk model-eval")
+        if not s.pinnwire_api_key:
+            print("Для линии нужен бесплатный ключ PinnWire: pinnwire.com → Trial, затем PINNWIRE_API_KEY в .env")
+        return 0
+
+    if args.cmd == "pinnwire-sample":
+        import json
+
+        from .sources.pinnwire import PinnWire, events, is_singles, money_line
+
+        if not s.pinnwire_api_key:
+            print("Нет PINNWIRE_API_KEY в .env. Бесплатный ключ: pinnwire.com → Trial (100 запросов в день, без карты).")
+            return 1
+        pw = PinnWire(make_client(s.user_agent), s.pinnwire_api_key)
+        me = pw.me()
+        data = pw.fixtures()
+        out = Path("data/pinnwire_sample.json")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"me": me, "fixtures": data}, ensure_ascii=False, indent=1), encoding="utf-8")
+        evs = events(data)
+        good = [e for e in evs if is_singles(e) and money_line(e)]
+        print(f"Тариф: {json.dumps(me, ensure_ascii=False)[:300]}")
+        print(f"Событий: {len(evs)}, одиночных с коэффициентами: {len(good)}. Ответ сохранён в {out}")
+        for e in good[:5]:
+            print(f"  {e.get('starts')} {e.get('league_name')}: {e.get('home')} — {e.get('away')} {money_line(e)}")
         return 0
 
     if args.cmd in ("sync-cs", "sync-lol"):
